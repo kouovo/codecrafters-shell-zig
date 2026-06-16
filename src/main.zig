@@ -7,5 +7,5 @@ pub fn main(init: std.process.Init) !void {
     try stdout.interface.print("", .{});
 
     // TODO: Uncomment the code below to pass the first stage
-    // try stdout.interface.print("$ ", .{});
+    try stdout.interface.print("$ ", .{});
 }
