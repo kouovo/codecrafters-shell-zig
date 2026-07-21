@@ -72,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .cd => {
                 const path = args.next().?;
+                out.write("{s}", .{path});
                 try std.process.setCurrentPath(init.io, path);
             },
             .unknown => {
