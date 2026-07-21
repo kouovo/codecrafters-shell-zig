@@ -9,12 +9,11 @@ fn parseBuiltin(name: []const u8) Builtin {
 fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
     var dirs = std.mem.tokenizeScalar(u8, path_env, ':');
     while (dirs.next()) |dir| {
-        std.debug.print("{s}\n", .{dir});
         if (dir.len == 0) continue;
         const full = try std.fs.path.join(gpa, &.{ dir, name });
         errdefer gpa.free(full);
 
-        std.Io.Dir.accessAbsolute(io, full, .{}) catch {
+        std.Io.Dir.accessAbsolute(io, full, .{ .execute = true }) catch {
             gpa.free(full);
             continue;
         };
