@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
                     // exec
                     var argv: std.ArrayList([]const u8) = .empty;
                     defer argv.deinit(init.gpa);
-                    try argv.append(init.gpa, full);
+                    try argv.append(init.gpa, cmd);
                     while (args.next()) |a| try argv.append(init.gpa, a);
                     try out.flush();
                     var child = try std.process.spawn(init.io, .{ .argv = argv.items });
