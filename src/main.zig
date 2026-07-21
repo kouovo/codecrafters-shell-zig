@@ -4,15 +4,17 @@ const Builtin = enum { exit, echo, unknown };
 fn parseBuiltin(name: []const u8) Builtin {
     const map = std.StaticStringMap(Builtin).initComptime(.{
         .{ "exit", .exit },
-        .{ "echo", .exit },
+        .{ "echo", .echo },
     });
     return map.get(name) orelse .unknown;
 }
 
 pub fn main(init: std.process.Init) !void {
-    var stdout = std.Io.File.stdout().writer(init.io, &.{});
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     var stdin_buffer: [4096]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &stdin_buffer);
+
     const out = &stdout.interface;
 
     while (true) {
@@ -22,9 +24,9 @@ pub fn main(init: std.process.Init) !void {
         const line = (try stdin.interface.takeDelimiter('\n')) orelse
             break;
         var args = std.mem.tokenizeScalar(u8, line, ' ');
-        const name = args.next() orelse continue; // 空行：重新提示
+        const cmd = args.next() orelse continue;
 
-        switch (parseBuiltin(name)) {
+        switch (parseBuiltin(cmd)) {
             .exit => break,
             .echo => {
                 var first = true;
@@ -35,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try out.writeAll("\n");
             },
-            .unknown => try out.print("{s}: command not found\n", .{name}),
+            .unknown => try out.print("{s}: command not found\n", .{cmd}),
         }
         try out.flush();
     }
