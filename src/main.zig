@@ -1,37 +1,42 @@
 const std = @import("std");
 
+const Builtin = enum { exit, echo, unknown };
+fn parseBuiltin(name: []const u8) Builtin {
+    const map = std.StaticStringMap(Builtin).initComptime(.{
+        .{ "exit", .exit },
+        .{ "echo", .exit },
+    });
+    return map.get(name) orelse .unknown;
+}
+
 pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(init.io, &.{});
     var stdin_buffer: [4096]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &stdin_buffer);
+    const out = &stdout.interface;
 
     while (true) {
-        try stdout.interface.print("$ ", .{});
-        const command = try stdin.interface.takeDelimiter('\n');
-        const cmd = command orelse break;
-        var args_iter = std.mem.tokenizeSequence(u8, cmd, " ");
-        const name = args_iter.next().?;
+        try out.writeAll("$ ");
+        try out.flush();
 
-        // while (args_iter.next()) |item| {
-        //     std.debug.print("args: '{s}'\n", .{item});
-        // }
-
-        if (std.mem.eql(u8, name, "exit")) {
+        const line = (try stdin.interface.takeDelimiter('\n')) orelse
             break;
-        } else if (std.mem.eql(u8, name, "echo")) {
-            // std.debug.print("{s} ", .{cmd[1..cmd.len]});
-            while (args_iter.next()) |item| {
-                std.debug.print("{s} ", .{item});
-            }
+        var args = std.mem.tokenizeScalar(u8, line, ' ');
+        const name = args.next() orelse continue; // 空行：重新提示
 
-            std.debug.print("\n", .{});
-            continue;
+        switch (parseBuiltin(name)) {
+            .exit => break,
+            .echo => {
+                var first = true;
+                while (args.next()) |arg| {
+                    if (!first) try out.writeAll(" ");
+                    try out.writeAll(arg);
+                    first = false;
+                }
+                try out.writeAll("\n");
+            },
+            .unknown => try out.print("{s}: command not found\n", .{name}),
         }
-        // else if (std.mem.eql()) {
-        //     // const args = cmd[1..cmd.len];
-        //     // std.debug.print("{s}\n", .{args});
-        // }
-
-        try stdout.interface.print("{s}: command not found\n", .{command.?});
+        try out.flush();
     }
 }
