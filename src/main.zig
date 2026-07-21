@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
 
                 // try out.print("{s}", .{path});
                 std.process.setCurrentPath(init.io, path) catch {
-                    try out.print("cd: {s}: No Such file or directory\n", .{path});
+                    try out.print("cd: {s}: No such file or directory\n", .{path});
                 };
             },
             .unknown => {
