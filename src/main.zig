@@ -30,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
 
     const out = &stdout.interface;
 
+    const path_env = init.environ_map.get("PATH") orelse "";
     while (true) {
         try out.writeAll("$ ");
         try out.flush();
@@ -47,7 +48,6 @@ pub fn main(init: std.process.Init) !void {
                 if (parseBuiltin(cmd2) != .unknown) {
                     try out.print("{s} is a shell builtin\n", .{cmd2});
                 } else {
-                    const path_env = init.environ_map.get("PATH") orelse "";
                     if (try findExecutable(init.io, init.gpa, path_env, cmd2)) |full| {
                         defer init.gpa.free(full);
                         try out.print("{s} is {s}\n", .{ cmd2, full });
@@ -65,7 +65,21 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try out.writeAll("\n");
             },
-            .unknown => try out.print("{s}: command not found\n", .{cmd}),
+            .unknown => {
+                if (try findExecutable(init.io, init.gpa, path_env, cmd)) |full| {
+                    defer init.gpa.free(full);
+                    // exec
+                    var argv: std.ArrayList([]const u8) = .empty;
+                    defer argv.deinit(init.gpa);
+                    try argv.append(init.gpa, full);
+                    while (args.next()) |a| try argv.append(init.gpa, a);
+                    try out.flush();
+                    var child = try std.process.spawn(init.io, .{ .argv = argv.items });
+                    _ = try child.wait(init.io);
+                } else {
+                    try out.print("{s}: command not found\n", .{cmd});
+                }
+            },
         }
         try out.flush();
     }
