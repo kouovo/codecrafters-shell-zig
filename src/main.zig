@@ -71,10 +71,13 @@ pub fn main(init: std.process.Init) !void {
                 try out.print("{s}\n", .{buf[0..n]});
             },
             .cd => {
-                const path = args.next() orelse (init.environ_map.get("HOME")) orelse {
-                    try out.print("cd: $HOME not set\n", .{});
-                    continue;
-                };
+                const home = init.environ_map.get("HOME") orelse "";
+                const raw = args.next() orelse home;
+                const path = if (raw.len == 0 or std.mem.eql(u8, raw, "~"))
+                    home
+                else
+                    raw;
+
                 // try out.print("{s}", .{path});
                 std.process.setCurrentPath(init.io, path) catch {
                     try out.print("cd: {s}: No Such file or directory\n", .{path});
