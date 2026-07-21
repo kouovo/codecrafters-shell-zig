@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const Builtin = enum { exit, echo, type, unknown };
+const Builtin = enum { exit, echo, type, pwd, unknown };
 fn parseBuiltin(name: []const u8) Builtin {
-    const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type } });
+    const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type }, .{ "pwd", .pwd } });
     return map.get(name) orelse .unknown;
 }
 
@@ -64,6 +64,11 @@ pub fn main(init: std.process.Init) !void {
                     first = false;
                 }
                 try out.writeAll("\n");
+            },
+            .pwd => {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const n = try std.process.currentPath(init.io, &buf);
+                try out.print("{s}\n", .{buf[0..n]});
             },
             .unknown => {
                 if (try findExecutable(init.io, init.gpa, path_env, cmd)) |full| {
