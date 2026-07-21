@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Builtin = enum { exit, echo, type, unknown };
+const Builtin = enum { exit, echo, type, pwd, unknown };
 fn parseBuiltin(name: []const u8) Builtin {
     const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type } });
     return map.get(name) orelse .unknown;
