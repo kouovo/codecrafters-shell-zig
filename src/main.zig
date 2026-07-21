@@ -25,6 +25,14 @@ pub fn main(init: std.process.Init) !void {
 
         switch (parseBuiltin(cmd)) {
             .exit => break,
+            .type => {
+                const cmd2 = args.next() orelse continue;
+                if (parseBuiltin(cmd2) != .unknown) {
+                    try out.print("{s} is a shell builtin\n", .{cmd2});
+                } else {
+                    try out.print("{s}: not found\n", .{cmd2});
+                }
+            },
             .echo => {
                 var first = true;
                 while (args.next()) |arg| {
