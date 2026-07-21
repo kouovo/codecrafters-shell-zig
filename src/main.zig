@@ -6,6 +6,22 @@ fn parseBuiltin(name: []const u8) Builtin {
     return map.get(name) orelse .unknown;
 }
 
+fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
+    var dirs = std.mem.tokenizeScalar(u8, path_env, ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        const full = try std.fs.path.join(gpa, &.{ dir, name });
+        errdefer gpa.free(full);
+
+        std.Io.Dir.accessAbsolute(io, full, .{}) catch {
+            gpa.free(full);
+            continue;
+        };
+        return full;
+    }
+    return null;
+}
+
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
@@ -27,10 +43,17 @@ pub fn main(init: std.process.Init) !void {
             .exit => break,
             .type => {
                 const cmd2 = args.next() orelse continue;
+
                 if (parseBuiltin(cmd2) != .unknown) {
                     try out.print("{s} is a shell builtin\n", .{cmd2});
                 } else {
-                    try out.print("{s}: not found\n", .{cmd2});
+                    const path_env = init.environ_map.get("PATH") orelse "";
+                    if (try findExecutable(init.io, init.gpa, path_env, cmd2)) |full| {
+                        defer init.gpa.free(full);
+                        try out.print("{s} is {s}\n", .{ cmd2, full });
+                    } else {
+                        try out.print("{s}: not found\n", .{cmd2});
+                    }
                 }
             },
             .echo => {
