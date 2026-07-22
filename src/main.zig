@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
+
 fn parseBuiltin(name: []const u8) Builtin {
     const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type }, .{ "pwd", .pwd }, .{ "cd", .cd } });
     return map.get(name) orelse .unknown;
@@ -39,38 +40,29 @@ pub fn main(init: std.process.Init) !void {
         const line = (try stdin.interface.takeDelimiter('\n')) orelse
             break;
         var it = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(init.gpa, line);
-
         defer it.deinit();
 
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(init.gpa);
-
-        while (it.next()) |arg| {
-            try argv.append(init.gpa, arg);
-        }
-
-        const cmd = argv[0] orelse continue;
-        const args = argv[1..];
+        const cmd = it.next() orelse continue;
 
         switch (parseBuiltin(cmd)) {
             .exit => break,
             .type => {
-                const cmd2 = args.next() orelse continue;
-
+                const cmd2 = it.next() orelse {
+                    try out.writeAll("type: usage: type NAME\n");
+                    continue;
+                };
                 if (parseBuiltin(cmd2) != .unknown) {
                     try out.print("{s} is a shell builtin\n", .{cmd2});
+                } else if (try findExecutable(init.io, init.gpa, path_env, cmd2)) |full| {
+                    defer init.gpa.free(full);
+                    try out.print("{s} is {s}\n", .{ cmd2, full });
                 } else {
-                    if (try findExecutable(init.io, init.gpa, path_env, cmd2)) |full| {
-                        defer init.gpa.free(full);
-                        try out.print("{s} is {s}\n", .{ cmd2, full });
-                    } else {
-                        try out.print("{s}: not found\n", .{cmd2});
-                    }
+                    try out.print("{s}: not found\n", .{cmd2});
                 }
             },
             .echo => {
                 var first = true;
-                while (args.next()) |arg| {
+                while (it.next()) |arg| {
                     if (!first) try out.writeAll(" ");
                     try out.writeAll(arg);
                     first = false;
@@ -84,13 +76,12 @@ pub fn main(init: std.process.Init) !void {
             },
             .cd => {
                 const home = init.environ_map.get("HOME") orelse "";
-                const raw = args.next() orelse home;
+                const raw = it.next() orelse home;
                 const path = if (raw.len == 0 or std.mem.eql(u8, raw, "~"))
                     home
                 else
                     raw;
 
-                // try out.print("{s}", .{path});
                 std.process.setCurrentPath(init.io, path) catch {
                     try out.print("cd: {s}: No such file or directory\n", .{path});
                 };
@@ -98,6 +89,12 @@ pub fn main(init: std.process.Init) !void {
             .unknown => {
                 if (try findExecutable(init.io, init.gpa, path_env, cmd)) |full| {
                     defer init.gpa.free(full);
+
+                    var argv: std.ArrayList([]const u8) = .empty;
+                    defer argv.deinit(init.gpa);
+                    try argv.append(init.gpa, cmd);
+                    while (it.next()) |arg| try argv.append(init.gpa, arg);
+
                     try out.flush();
                     var child = try std.process.spawn(init.io, .{ .argv = argv.items });
                     _ = try child.wait(init.io);
