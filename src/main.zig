@@ -49,8 +49,8 @@ pub fn main(init: std.process.Init) !void {
             try argv.append(init.gpa, arg);
         }
 
-        var args = std.mem.tokenizeScalar(u8, line, ' ');
-        const cmd = args.next() orelse continue;
+        const cmd = argv[0] orelse continue;
+        const args = argv[1..];
 
         switch (parseBuiltin(cmd)) {
             .exit => break,
