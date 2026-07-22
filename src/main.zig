@@ -4,6 +4,7 @@ const Builtin = enum { exit, echo, type, pwd, unknown, cd };
 fn parseBuiltin(name: []const u8) Builtin {
     const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type }, .{ "pwd", .pwd }, .{ "cd", .cd } });
     return map.get(name) orelse .unknown;
+    // std.meta.stringToEnum(Builtin, name);
 }
 
 fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
@@ -37,6 +38,17 @@ pub fn main(init: std.process.Init) !void {
 
         const line = (try stdin.interface.takeDelimiter('\n')) orelse
             break;
+        var it = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(init.gpa, line);
+
+        defer it.deinit();
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(init.gpa);
+
+        while (it.next()) |arg| {
+            try argv.append(init.gpa, arg);
+        }
+
         var args = std.mem.tokenizeScalar(u8, line, ' ');
         const cmd = args.next() orelse continue;
 
@@ -86,11 +98,6 @@ pub fn main(init: std.process.Init) !void {
             .unknown => {
                 if (try findExecutable(init.io, init.gpa, path_env, cmd)) |full| {
                     defer init.gpa.free(full);
-                    // exec
-                    var argv: std.ArrayList([]const u8) = .empty;
-                    defer argv.deinit(init.gpa);
-                    try argv.append(init.gpa, cmd);
-                    while (args.next()) |a| try argv.append(init.gpa, a);
                     try out.flush();
                     var child = try std.process.spawn(init.io, .{ .argv = argv.items });
                     _ = try child.wait(init.io);
