@@ -1,12 +1,102 @@
 const std = @import("std");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
+const State = enum { normal, double, single };
 
 fn parseBuiltin(name: []const u8) Builtin {
-    const map = std.StaticStringMap(Builtin).initComptime(.{ .{ "exit", .exit }, .{ "echo", .echo }, .{ "type", .type }, .{ "pwd", .pwd }, .{ "cd", .cd } });
-    return map.get(name) orelse .unknown;
-    // std.meta.stringToEnum(Builtin, name);
+    return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
+
+// const Token = struct {
+//     text: u8,
+// };
+
+const Tokenizer = struct {
+    src: []u8,
+    read: usize = 0,
+    write: usize = 0,
+    fn isBlank(c: u8) bool {
+        return c == ' ' or c == '\t';
+    }
+    pub fn next(self: *Tokenizer) ?[]u8 {
+        while (self.read < self.src.len and isBlank(self.src[self.read])) self.read += 1;
+        if (self.read >= self.src.len) return null;
+        const start = self.write;
+        var state: State = .normal;
+        while (self.read < self.src.len) {
+            const c = self.src[self.read];
+            switch (state) {
+                .normal => {
+                    if (isBlank(c)) break;
+                    if (c == '\'') {
+                        state = .single;
+                        self.read += 1;
+                        continue;
+                    }
+
+                    if (c == '"') {
+                        state = .double;
+                        self.read += 1;
+                        continue;
+                    }
+
+                    if (c == '\\') {
+                        self.read += 1;
+                        if (self.read < self.src.len) {
+                            self.src[self.write] = self.src[self.read];
+                            self.write += 1;
+                            self.read += 1;
+                        }
+                        continue;
+                    }
+                    self.src[self.write] = c;
+                    self.write += 1;
+                    self.read += 1;
+                },
+
+                .single => {
+                    if (c == '\'') {
+                        state = .normal;
+                        self.read += 1;
+                        continue;
+                    }
+
+                    self.src[self.write] = c;
+                    self.write += 1;
+                    self.read += 1;
+                },
+
+                .double => {
+                    if (c == '"') {
+                        state = .normal;
+                        self.read += 1;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        const next_c = self.src[self.read + 1];
+                        if (next_c == '"' or next_c == '\\' or next_c == '$' or next_c == '`') {
+                            self.read += 1;
+                            self.src[self.write] += self.src[self.read];
+                            self.write += 1;
+                            self.read += 1;
+                        }
+                        self.src[self.write] = c;
+                        self.write += 1;
+                        self.read += 1;
+                        continue;
+                    }
+                    self.src[self.write] = c;
+                    self.write += 1;
+                    self.read += 1;
+                },
+            }
+        }
+        return self.src[start..self.write];
+    }
+    // pub fn deinit(){
+    //
+    // }
+};
 
 fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
     var dirs = std.mem.tokenizeScalar(u8, path_env, ':');
@@ -39,8 +129,7 @@ pub fn main(init: std.process.Init) !void {
 
         const line = (try stdin.interface.takeDelimiter('\n')) orelse
             break;
-        var it = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(init.gpa, line);
-        defer it.deinit();
+        var it: Tokenizer = .{ .write = 0, .read = 0, .src = line };
 
         const cmd = it.next() orelse continue;
 
