@@ -7,20 +7,19 @@ fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
 
-// const Token = struct {
-//     text: u8,
-// };
-
 const Tokenizer = struct {
     src: []u8,
     read: usize = 0,
     write: usize = 0,
+
     fn isBlank(c: u8) bool {
         return c == ' ' or c == '\t';
     }
+
     pub fn next(self: *Tokenizer) ?[]u8 {
         while (self.read < self.src.len and isBlank(self.src[self.read])) self.read += 1;
         if (self.read >= self.src.len) return null;
+
         const start = self.write;
         var state: State = .normal;
         while (self.read < self.src.len) {
@@ -33,13 +32,11 @@ const Tokenizer = struct {
                         self.read += 1;
                         continue;
                     }
-
                     if (c == '"') {
                         state = .double;
                         self.read += 1;
                         continue;
                     }
-
                     if (c == '\\') {
                         self.read += 1;
                         if (self.read < self.src.len) {
@@ -60,7 +57,6 @@ const Tokenizer = struct {
                         self.read += 1;
                         continue;
                     }
-
                     self.src[self.write] = c;
                     self.write += 1;
                     self.read += 1;
@@ -73,16 +69,23 @@ const Tokenizer = struct {
                         continue;
                     }
                     if (c == '\\') {
+                        if (self.read + 1 >= self.src.len) {
+                            self.src[self.write] = c;
+                            self.write += 1;
+                            self.read += 1;
+                            continue;
+                        }
                         const next_c = self.src[self.read + 1];
                         if (next_c == '"' or next_c == '\\' or next_c == '$' or next_c == '`') {
                             self.read += 1;
-                            self.src[self.write] += self.src[self.read];
+                            self.src[self.write] = self.src[self.read];
+                            self.write += 1;
+                            self.read += 1;
+                        } else {
+                            self.src[self.write] = c;
                             self.write += 1;
                             self.read += 1;
                         }
-                        self.src[self.write] = c;
-                        self.write += 1;
-                        self.read += 1;
                         continue;
                     }
                     self.src[self.write] = c;
@@ -93,9 +96,6 @@ const Tokenizer = struct {
         }
         return self.src[start..self.write];
     }
-    // pub fn deinit(){
-    //
-    // }
 };
 
 fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
@@ -127,9 +127,8 @@ pub fn main(init: std.process.Init) !void {
         try out.writeAll("$ ");
         try out.flush();
 
-        const line = (try stdin.interface.takeDelimiter('\n')) orelse
-            break;
-        var it: Tokenizer = .{ .write = 0, .read = 0, .src = line };
+        const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
+        var it: Tokenizer = .{ .src = line };
 
         const cmd = it.next() orelse continue;
 
@@ -195,3 +194,4 @@ pub fn main(init: std.process.Init) !void {
         try out.flush();
     }
 }
+
