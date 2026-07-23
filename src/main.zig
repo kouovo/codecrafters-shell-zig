@@ -1,100 +1,121 @@
 const std = @import("std");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
-const State = enum { normal, double, single };
 
 fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
 
-const Tokenizer = struct {
-    src: []u8,
-    read: usize = 0,
-    write: usize = 0,
+pub const Tokenizer = struct {
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    buffer: []u8,
+    index: usize = 0,
+    start: usize = 0,
+    end: usize = 0,
 
-    fn isBlank(c: u8) bool {
-        return c == ' ' or c == '\t';
+    const Self = @This();
+    const State = enum { normal, single, double };
+
+    pub const InitError = error{OutOfMemory};
+
+    pub fn init(allocator: std.mem.Allocator, src: []const u8) InitError!Self {
+        const buffer = try allocator.alloc(u8, src.len + 1);
+        errdefer allocator.free(buffer);
+        return .{ .allocator = allocator, .src = src, .buffer = buffer };
     }
 
-    pub fn next(self: *Tokenizer) ?[]u8 {
-        while (self.read < self.src.len and isBlank(self.src[self.read])) self.read += 1;
-        if (self.read >= self.src.len) return null;
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.buffer);
+    }
 
-        const start = self.write;
+    pub fn next(self: *Self) ?[:0]const u8 {
+        while (self.index < self.src.len and isBlank(self.src[self.index])) self.index += 1;
+        if (self.index >= self.src.len) return null;
+
+        self.start = self.end;
         var state: State = .normal;
-        while (self.read < self.src.len) {
-            const c = self.src[self.read];
+        while (self.index < self.src.len) {
+            const c = self.src[self.index];
             switch (state) {
                 .normal => {
-                    if (isBlank(c)) break;
+                    if (isBlank(c)) return self.finish();
                     if (c == '\'') {
                         state = .single;
-                        self.read += 1;
+                        self.index += 1;
                         continue;
                     }
                     if (c == '"') {
                         state = .double;
-                        self.read += 1;
+                        self.index += 1;
                         continue;
                     }
                     if (c == '\\') {
-                        self.read += 1;
-                        if (self.read < self.src.len) {
-                            self.src[self.write] = self.src[self.read];
-                            self.write += 1;
-                            self.read += 1;
+                        self.index += 1;
+                        if (self.index < self.src.len) {
+                            self.write(self.src[self.index]);
+                            self.index += 1;
                         }
                         continue;
                     }
-                    self.src[self.write] = c;
-                    self.write += 1;
-                    self.read += 1;
+                    self.write(c);
+                    self.index += 1;
                 },
-
                 .single => {
                     if (c == '\'') {
                         state = .normal;
-                        self.read += 1;
+                        self.index += 1;
                         continue;
                     }
-                    self.src[self.write] = c;
-                    self.write += 1;
-                    self.read += 1;
+                    self.write(c);
+                    self.index += 1;
                 },
-
                 .double => {
                     if (c == '"') {
                         state = .normal;
-                        self.read += 1;
+                        self.index += 1;
                         continue;
                     }
                     if (c == '\\') {
-                        if (self.read + 1 >= self.src.len) {
-                            self.src[self.write] = c;
-                            self.write += 1;
-                            self.read += 1;
+                        if (self.index + 1 >= self.src.len) {
+                            self.write(c);
+                            self.index += 1;
                             continue;
                         }
-                        const next_c = self.src[self.read + 1];
-                        if (next_c == '"' or next_c == '\\' or next_c == '$' or next_c == '`') {
-                            self.read += 1;
-                            self.src[self.write] = self.src[self.read];
-                            self.write += 1;
-                            self.read += 1;
+                        const n = self.src[self.index + 1];
+                        if (n == '"' or n == '\\' or n == '$' or n == '`') {
+                            self.write(n);
+                            self.index += 2;
                         } else {
-                            self.src[self.write] = c;
-                            self.write += 1;
-                            self.read += 1;
+                            self.write(c);
+                            self.index += 1;
                         }
                         continue;
                     }
-                    self.src[self.write] = c;
-                    self.write += 1;
-                    self.read += 1;
+                    self.write(c);
+                    self.index += 1;
                 },
             }
         }
-        return self.src[start..self.write];
+        return self.finish();
+    }
+
+    /// 在 buffer[end] 写 0,返回 [start..end :0],并把游标推过终止符。
+    fn finish(self: *Self) [:0]const u8 {
+        self.buffer[self.end] = 0;
+        const token = self.buffer[self.start..self.end :0];
+        self.end += 1;
+        self.start = self.end;
+        return token;
+    }
+
+    fn write(self: *Self, c: u8) void {
+        self.buffer[self.end] = c;
+        self.end += 1;
+    }
+
+    fn isBlank(c: u8) bool {
+        return c == ' ' or c == '\t';
     }
 };
 
@@ -128,7 +149,8 @@ pub fn main(init: std.process.Init) !void {
         try out.flush();
 
         const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
-        var it: Tokenizer = .{ .src = line };
+        var it = try Tokenizer.init(init.gpa, line);
+        defer it.deinit();
 
         const cmd = it.next() orelse continue;
 
