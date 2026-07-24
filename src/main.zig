@@ -1,9 +1,12 @@
 const std = @import("std");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
-const Op = enum { gt, gtgt, lt };
+const Op = struct {
+    kind: enum { gt, gtgt, lt },
+    fd: u8, // 0=stdin, 1=stdout, 2=stderr
+};
 const Result = union(enum) { word: [:0]const u8, op: Op };
-const Redir = struct { fd: u8, path: []const u8, op: Op };
+const Redir = struct { op: Op, path: []const u8 };
 
 fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
@@ -80,20 +83,18 @@ pub const Tokenizer = struct {
                 }
                 return .normal;
             },
-            '>' => {
-                self.index += 1;
-                if (self.index < self.src.len and self.src[self.index] == '>') {
+            '>', '<' => return self.emitOp(if (c == '>') 1 else 0),
+            '0', '1', '2' => {
+                if (self.index + 1 < self.src.len and
+                    (self.src[self.index + 1] == '>' or self.src[self.index + 1] == '<'))
+                {
+                    const fd = c - '0';
                     self.index += 1;
-                    self.pending = .{ .op = .gtgt };
-                } else {
-                    self.pending = .{ .op = .gt };
+                    return self.emitOp(fd);
                 }
-                return .done;
-            },
-            '<' => {
+                self.write(c);
                 self.index += 1;
-                self.pending = .{ .op = .lt };
-                return .done;
+                return .normal;
             },
             else => {
                 self.write(c);
@@ -101,6 +102,22 @@ pub const Tokenizer = struct {
                 return .normal;
             },
         }
+    }
+
+    fn emitOp(self: *Self, fd: u8) Msg {
+        const c = self.src[self.index];
+        self.index += 1;
+        if (c == '>') {
+            if (self.index < self.src.len and self.src[self.index] == '>') {
+                self.index += 1;
+                self.pending = .{ .op = .{ .kind = .gtgt, .fd = fd } };
+            } else {
+                self.pending = .{ .op = .{ .kind = .gt, .fd = fd } };
+            }
+        } else { // '<'
+            self.pending = .{ .op = .{ .kind = .lt, .fd = fd } };
+        }
+        return .done;
     }
 
     fn handleSingle(self: *Self) Error!Msg {
@@ -214,7 +231,7 @@ fn processLine(
         .word => |w| try argv.append(init.gpa, w),
         .op => |op| {
             const target = (try it.next()) orelse return .cont;
-            redir = .{ .fd = if (op == .lt) 0 else 1, .op = op, .path = target.word };
+            redir = .{ .op = op, .path = target.word };
         },
     };
 
@@ -243,12 +260,12 @@ fn processLine(
 
             const w: *std.Io.Writer = blk: {
                 if (redir) |r| {
-                    if (r.fd == 1 and r.op != .lt) {
+                    if (r.op.fd == 1 and r.op.kind != .lt) {
                         const flags: std.posix.O = .{
                             .ACCMODE = .WRONLY,
                             .CREAT = true,
-                            .TRUNC = r.op == .gt,
-                            .APPEND = r.op == .gtgt,
+                            .TRUNC = r.op.kind == .gt,
+                            .APPEND = r.op.kind == .gtgt,
                         };
                         const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
                             break :blk out;
@@ -304,12 +321,12 @@ fn processLine(
 
                 const stdout_io: std.process.SpawnOptions.StdIo = blk: {
                     if (redir) |r| {
-                        if (r.fd == 1 and r.op != .lt) {
+                        if (r.op.fd == 1 and r.op.kind != .lt) {
                             const flags: std.posix.O = .{
                                 .ACCMODE = .WRONLY,
                                 .CREAT = true,
-                                .TRUNC = r.op == .gt,
-                                .APPEND = r.op == .gtgt,
+                                .TRUNC = r.op.kind == .gt,
+                                .APPEND = r.op.kind == .gtgt,
                             };
                             const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
                                 break :blk .inherit;
