@@ -318,32 +318,24 @@ fn processLine(
 
                 var redir_file: ?std.Io.File = null;
                 defer if (redir_file) |f| f.close(init.io);
+                var opts: std.process.SpawnOptions = .{ .argv = exec_argv.items };
 
-                const stdout_io: std.process.SpawnOptions.StdIo = blk: {
-                    if (redir) |r| {
-                        if (r.op.fd == 1 and r.op.kind != .lt) {
-                            const flags: std.posix.O = .{
-                                .ACCMODE = .WRONLY,
-                                .CREAT = true,
-                                .TRUNC = r.op.kind == .gt,
-                                .APPEND = r.op.kind == .gtgt,
-                            };
-                            const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
-                                break :blk .inherit;
-                            };
+                if (redir) |r| {
+                    const flags: std.posix.O = if (r.op.kind == .lt) .{ .ACCMODE = .RDONLY } else .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = r.op.kind == .gt, .APPEND = r.op.kind == .gtgt };
+                    const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
+                        // break;
+                    };
 
-                            redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
-                            break :blk .{ .file = redir_file.? };
-                        }
+                    redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+                    const io_val: std.process.SpawnOptions.StdIo = .{ .file = redir_file.? };
+                    switch (r.op.fd) {
+                        0 => opts.stdin = io_val,
+                        1 => opts.stdout = io_val,
+                        2 => opts.stderr = io_val,
                     }
-                    break :blk .inherit;
-                };
+                }
 
-                var child = try std.process.spawn(init.io, .{
-                    .argv = exec_argv.items,
-                    .stdout = stdout_io,
-                });
-
+                var child = try std.process.spawn(init.io, opts);
                 _ = try child.wait(init.io);
             } else {
                 try out.print("{s}: command not found\n", .{cmd.word});
