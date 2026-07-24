@@ -322,9 +322,7 @@ fn processLine(
 
                 if (redir) |r| {
                     const flags: std.posix.O = if (r.op.kind == .lt) .{ .ACCMODE = .RDONLY } else .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = r.op.kind == .gt, .APPEND = r.op.kind == .gtgt };
-                    const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
-                        // break;
-                    };
+                    const fd = try std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644);
 
                     redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
                     const io_val: std.process.SpawnOptions.StdIo = .{ .file = redir_file.? };
@@ -332,6 +330,7 @@ fn processLine(
                         0 => opts.stdin = io_val,
                         1 => opts.stdout = io_val,
                         2 => opts.stderr = io_val,
+                        else => {},
                     }
                 }
 
