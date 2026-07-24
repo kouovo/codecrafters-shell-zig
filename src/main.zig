@@ -1,6 +1,9 @@
 const std = @import("std");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
+const Op = enum { gt, gtgt, lt };
+const Result = union(enum) { word: [:0]const u8, op: Op };
+const Redir = struct { fd: u8, path: []const u8, op: Op };
 
 fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
@@ -13,6 +16,7 @@ pub const Tokenizer = struct {
     index: usize = 0,
     start: usize = 0,
     end: usize = 0,
+    pending: ?Result = null,
 
     const Self = @This();
     const Msg = enum { normal, single, double, done };
@@ -30,7 +34,11 @@ pub const Tokenizer = struct {
         self.allocator.free(self.buffer);
     }
 
-    pub fn next(self: *Self) Error!?[:0]const u8 {
+    pub fn next(self: *Self) Error!?Result {
+        if (self.pending) |p| {
+            self.pending = null;
+            return p;
+        }
         while (self.index < self.src.len and isBlank(self.src[self.index])) self.index += 1;
         if (self.index >= self.src.len) return null;
 
@@ -44,6 +52,11 @@ pub const Tokenizer = struct {
                 .done => return self.finish(),
             };
         }
+    }
+    fn handleOperator(self: *Self) Result {
+        const c = self.src[self.index];
+        switch (c) {}
+        return Result{};
     }
 
     fn handleNormal(self: *Self) Error!Msg {
@@ -66,6 +79,21 @@ pub const Tokenizer = struct {
                     self.index += 1;
                 }
                 return .normal;
+            },
+            '>' => {
+                self.index += 1;
+                if (self.index < self.src.len and self.src[self.index] == '>') {
+                    self.index += 1;
+                    self.pending = .{ .op = .gtgt };
+                } else {
+                    self.pending = .{ .op = .gt };
+                }
+                return .done;
+            },
+            '<' => {
+                self.index += 1;
+                self.pending = .{ .op = .lt };
+                return .done;
             },
             else => {
                 self.write(c);
@@ -122,13 +150,24 @@ pub const Tokenizer = struct {
             },
         }
     }
+    fn peek(self: *Self) ?u8 {
+        if (self.index + 1 >= self.src.len) return null;
+        return self.src[self.index + 1];
+    }
 
-    fn finish(self: *Self) [:0]const u8 {
+    fn finish(self: *Self) Result {
+        // 没累积出 word 却遇到了 operator（如 "> file"），直接发 op，不发空 word
+        if (self.start == self.end) {
+            if (self.pending) |p| {
+                self.pending = null;
+                return p;
+            }
+        }
         self.buffer[self.end] = 0;
         const token = self.buffer[self.start..self.end :0];
         self.end += 1;
         self.start = self.end;
-        return token;
+        return Result{ .word = token };
     }
 
     fn write(self: *Self, c: u8) void {
@@ -167,16 +206,27 @@ fn processLine(
 ) !LineResult {
     var it = try Tokenizer.init(init.gpa, line);
     defer it.deinit();
-
     const cmd = (try it.next()) orelse return .cont;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(init.gpa);
 
-    switch (parseBuiltin(cmd)) {
+    var redir: ?Redir = null;
+    while (try it.next()) |tok| switch (tok) {
+        .word => |w| try argv.append(init.gpa, w),
+        .op => |op| {
+            const target = (try it.next()) orelse return .cont;
+            redir = .{ .fd = if (op == .lt) 0 else 1, .op = op, .path = target.word };
+        },
+    };
+
+    switch (parseBuiltin(cmd.word)) {
         .exit => return .exit,
         .type => {
-            const cmd2 = (try it.next()) orelse {
+            if (argv.items.len == 0) {
                 try out.writeAll("type: usage: type NAME\n");
                 return .cont;
-            };
+            }
+            const cmd2 = argv.items[0];
             if (parseBuiltin(cmd2) != .unknown) {
                 try out.print("{s} is a shell builtin\n", .{cmd2});
             } else if (try findExecutable(init.io, init.gpa, path_env, cmd2)) |full| {
@@ -187,13 +237,39 @@ fn processLine(
             }
         },
         .echo => {
+            var file_buf: [4096]u8 = undefined;
+            var file_writer: ?std.Io.File.Writer = null;
+            var redir_file: ?std.Io.File = null;
+            defer if (redir_file) |f| f.close(init.io);
+
+            const w: *std.Io.Writer = blk: {
+                if (redir) |r| {
+                    if (r.fd == 1 and r.op != .lt) {
+                        const flags: std.posix.O = .{
+                            .ACCMODE = .WRONLY,
+                            .CREAT = true,
+                            .TRUNC = r.op == .gt,
+                            .APPEND = r.op == .gtgt,
+                        };
+                        const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
+                            break :blk out;
+                        };
+                        redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+                        file_writer = redir_file.?.writerStreaming(init.io, &file_buf);
+                        break :blk &file_writer.?.interface;
+                    }
+                }
+                break :blk out;
+            };
+
             var first = true;
-            while (try it.next()) |arg| {
-                if (!first) try out.writeAll(" ");
-                try out.writeAll(arg);
+            for (argv.items) |arg| {
+                if (!first) try w.writeAll(" ");
+                try w.writeAll(arg);
                 first = false;
             }
-            try out.writeAll("\n");
+            try w.writeAll("\n");
+            try w.flush();
         },
         .pwd => {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -202,7 +278,7 @@ fn processLine(
         },
         .cd => {
             const home = init.environ_map.get("HOME") orelse "";
-            const raw = (try it.next()) orelse home;
+            const raw = if (argv.items.len > 0) argv.items[0] else home;
             const path = if (raw.len == 0 or std.mem.eql(u8, raw, "~"))
                 home
             else
@@ -213,19 +289,20 @@ fn processLine(
             };
         },
         .unknown => {
-            if (try findExecutable(init.io, init.gpa, path_env, cmd)) |full| {
+            if (try findExecutable(init.io, init.gpa, path_env, cmd.word)) |full| {
                 defer init.gpa.free(full);
 
-                var argv: std.ArrayList([]const u8) = .empty;
-                defer argv.deinit(init.gpa);
-                try argv.append(init.gpa, cmd);
-                while (try it.next()) |arg| try argv.append(init.gpa, arg);
+                // exec argv = [cmd.word, ...argv.items]
+                var exec_argv: std.ArrayList([]const u8) = .empty;
+                defer exec_argv.deinit(init.gpa);
+                try exec_argv.append(init.gpa, cmd.word);
+                for (argv.items) |arg| try exec_argv.append(init.gpa, arg);
 
                 try out.flush();
-                var child = try std.process.spawn(init.io, .{ .argv = argv.items });
+                var child = try std.process.spawn(init.io, .{ .argv = exec_argv.items });
                 _ = try child.wait(init.io);
             } else {
-                try out.print("{s}: command not found\n", .{cmd});
+                try out.print("{s}: command not found\n", .{cmd.word});
             }
         },
     }
@@ -254,4 +331,3 @@ pub fn main(init: std.process.Init) !void {
         try out.flush();
     }
 }
-
