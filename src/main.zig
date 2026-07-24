@@ -156,7 +156,6 @@ pub const Tokenizer = struct {
     }
 
     fn finish(self: *Self) Result {
-        // 没累积出 word 却遇到了 operator（如 "> file"），直接发 op，不发空 word
         if (self.start == self.end) {
             if (self.pending) |p| {
                 self.pending = null;
@@ -299,7 +298,35 @@ fn processLine(
                 for (argv.items) |arg| try exec_argv.append(init.gpa, arg);
 
                 try out.flush();
-                var child = try std.process.spawn(init.io, .{ .argv = exec_argv.items });
+
+                var redir_file: ?std.Io.File = null;
+                defer if (redir_file) |f| f.close(init.io);
+
+                const stdout_io: std.process.SpawnOptions.StdIo = blk: {
+                    if (redir) |r| {
+                        if (r.fd == 1 and r.op != .lt) {
+                            const flags: std.posix.O = .{
+                                .ACCMODE = .WRONLY,
+                                .CREAT = true,
+                                .TRUNC = r.op == .gt,
+                                .APPEND = r.op == .gtgt,
+                            };
+                            const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
+                                break :blk .inherit;
+                            };
+
+                            redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+                            break :blk .{ .file = redir_file.? };
+                        }
+                    }
+                    break :blk .inherit;
+                };
+
+                var child = try std.process.spawn(init.io, .{
+                    .argv = exec_argv.items,
+                    .stdout = stdout_io,
+                });
+
                 _ = try child.wait(init.io);
             } else {
                 try out.print("{s}: command not found\n", .{cmd.word});

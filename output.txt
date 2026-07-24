@@ -1,2 +1,8 @@
-1
-2
+build.zig
+build.zig.zon
+codecrafters.yml
+output.txt
+README.md
+src
+your_program.sh
+zig-out
