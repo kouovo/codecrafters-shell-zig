@@ -258,25 +258,27 @@ fn processLine(
             var redir_file: ?std.Io.File = null;
             defer if (redir_file) |f| f.close(init.io);
 
-            const w: *std.Io.Writer = blk: {
-                if (redir) |r| {
-                    if (r.op.fd == 1 and r.op.kind != .lt) {
-                        const flags: std.posix.O = .{
-                            .ACCMODE = .WRONLY,
-                            .CREAT = true,
-                            .TRUNC = r.op.kind == .gt,
-                            .APPEND = r.op.kind == .gtgt,
-                        };
-                        const fd = std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644) catch {
-                            break :blk out;
-                        };
+            var w: *std.Io.Writer = out;
+
+            if (redir) |r| {
+                if (r.op.kind != .lt) {
+                    const flags: std.posix.O = .{
+                        .ACCMODE = .WRONLY,
+                        .CREAT = true,
+                        .TRUNC = r.op.kind == .gt,
+                        .APPEND = r.op.kind == .gtgt,
+                    };
+                    if (std.posix.openat(std.posix.AT.FDCWD, r.path, flags, 0o644)) |fd| {
                         redir_file = .{ .handle = fd, .flags = .{ .nonblocking = false } };
-                        file_writer = redir_file.?.writerStreaming(init.io, &file_buf);
-                        break :blk &file_writer.?.interface;
+                        if (r.op.fd == 1) {
+                            file_writer = redir_file.?.writerStreaming(init.io, &file_buf);
+                            w = &file_writer.?.interface;
+                        }
+                    } else |_| {
+                        // 打不开就继续用 out（简单起见不报错）
                     }
                 }
-                break :blk out;
-            };
+            }
 
             var first = true;
             for (argv.items) |arg| {
@@ -308,7 +310,6 @@ fn processLine(
             if (try findExecutable(init.io, init.gpa, path_env, cmd.word)) |full| {
                 defer init.gpa.free(full);
 
-                // exec argv = [cmd.word, ...argv.items]
                 var exec_argv: std.ArrayList([]const u8) = .empty;
                 defer exec_argv.deinit(init.gpa);
                 try exec_argv.append(init.gpa, cmd.word);
