@@ -12,6 +12,131 @@ fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
 
+fn containsStr(items: []const []u8, name: []const u8) bool {
+    for (items) |it| if (std.mem.eql(u8, it, name)) return true;
+    return false;
+}
+
+const BUILTIN_NAMES = [_][]const u8{ "cd", "echo", "exit", "pwd", "type" };
+fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList([]u8)) !void {
+    const gpa = init.gpa;
+
+    for (BUILTIN_NAMES) |b| {
+        if (std.mem.startsWith(u8, b, prefix)) {
+            if (containsStr(list.items, b)) continue;
+            try list.append(gpa, try gpa.dupe(u8, b));
+        }
+    }
+    var path_iter = std.mem.tokenizeScalar(u8, path_env, ':');
+    while (path_iter.next()) |dir_path| {
+        if (dir_path.len == 0) continue;
+        var dir = std.Io.Dir.cwd().openDir(init.io, dir_path, .{ .iterate = true, .access_sub_paths = false }) catch continue;
+        defer dir.close(init.io);
+
+        var it = dir.iterate();
+
+        while (try it.next(init.io)) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+            dir.access(init.io, entry.name, .{ .execute = true }) catch continue;
+            if (containsStr(list.items, entry.name)) continue;
+            try list.append(gpa, try gpa.dupe(u8, entry.name));
+        }
+    }
+
+    std.mem.sort([]u8, list.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+}
+
+fn commonPrefixLen(items: []const []u8) usize {
+    if (items.len == 0) return 0;
+    const first = items[0];
+    var i: usize = 0;
+    outer: while (i < first.len) {
+        const c = first[i];
+        for (items[1..]) |rest| {
+            if (i >= rest.len or rest[i] != c) break :outer;
+        }
+        i += 1;
+    }
+    return i;
+}
+
+fn appendToLine(out: *std.Io.Writer, buf: []u8, len_ptr: *usize, pos_ptr: *usize, s: []const u8) !void {
+    for (s) |c| {
+        if (len_ptr.* >= buf.len) break;
+        buf[len_ptr.*] = c;
+        len_ptr.* += 1;
+        pos_ptr.* += 1;
+        try out.writeByte(c);
+    }
+}
+fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, buf: []u8, len_ptr: *usize, pos_ptr: *usize, tab_pending_ptr: *bool) !void {
+    const len = len_ptr.*;
+    var word_start: usize = 0;
+    var j: usize = len;
+    while (j > 0) {
+        j -= 1;
+        if (buf[j] == ' ' or buf[j] == '\t') {
+            word_start = j + 1;
+            break;
+        }
+    }
+
+    const word = buf[word_start..len];
+
+    if (word_start != 0) {
+        tab_pending_ptr.* = false;
+        return;
+    }
+    var candidates: std.ArrayList([]u8) = .empty;
+    defer {
+        for (candidates.items) |c| init.gpa.free(c);
+        candidates.deinit(init.gpa);
+    }
+    try gatherCandidates(init, path_env, word, &candidates);
+
+    if (candidates.items.len == 0) {
+        try out.writeByte(0x07);
+        tab_pending_ptr.* = false;
+        return;
+    }
+
+    if (candidates.items.len == 1) {
+        const comp = candidates.items[0];
+        try appendToLine(out, buf, len_ptr, pos_ptr, comp[word.len..]);
+        try appendToLine(out, buf, len_ptr, pos_ptr, " ");
+        tab_pending_ptr.* = false;
+        return;
+    }
+    const common = commonPrefixLen(candidates.items);
+    if (common > word.len) {
+        const comp = candidates.items[0];
+        try appendToLine(out, buf, len_ptr, pos_ptr, comp[word.len..common]);
+        tab_pending_ptr.* = false;
+        return;
+    }
+
+    if (tab_pending_ptr.*) {
+        try out.writeByte('\n');
+        for (candidates.items, 0..) |c, idx| {
+            if (idx > 0) try out.writeAll("  ");
+            try out.writeAll(c);
+        }
+
+        try out.writeByte('\n');
+        try out.writeAll("$ ");
+        try out.writeAll(buf[0..len_ptr.*]);
+        tab_pending_ptr.* = false;
+    } else {
+        try out.writeByte(0x07);
+        tab_pending_ptr.* = true;
+    }
+}
+
 pub const Tokenizer = struct {
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -274,9 +399,7 @@ fn processLine(
                             file_writer = redir_file.?.writerStreaming(init.io, &file_buf);
                             w = &file_writer.?.interface;
                         }
-                    } else |_| {
-                        // 打不开就继续用 out（简单起见不报错）
-                    }
+                    } else |_| {}
                 }
             }
 
@@ -351,19 +474,113 @@ pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [4096]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &stdin_buffer);
 
+    var orig_termios: std.posix.termios = undefined;
+    const interactive = blk: {
+        orig_termios = std.posix.tcgetattr(std.posix.STDIN_FILENO) catch break :blk false;
+        break :blk true;
+    };
+
+    if (interactive) {
+        var raw = orig_termios;
+        raw.lflag.ICANON = false;
+        raw.lflag.ECHO = false;
+        raw.cc[4] = 1;
+        raw.cc[5] = 0;
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw) catch {};
+    }
+    defer if (interactive) {
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, orig_termios) catch {};
+    };
+
     const out = &stdout.interface;
 
     const path_env = init.environ_map.get("PATH") orelse "";
+    if (interactive) {
+        var line_buf: [4096]u8 = undefined;
+        try runRawLoop(init, out, &stdin.interface, path_env, &line_buf);
+    } else {
+        while (true) {
+            try out.writeAll("$ ");
+            try out.flush();
+
+            const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
+            const r = processLine(init, out, path_env, line) catch {
+                try out.writeAll("unexpected EOF while looking for matching quote\n");
+                continue;
+            };
+            if (r == .exit) break;
+            try out.flush();
+        }
+    }
+}
+
+fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader, path_env: []const u8, buf: []u8) !void {
     while (true) {
         try out.writeAll("$ ");
         try out.flush();
 
-        const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
-        const r = processLine(init, out, path_env, line) catch {
+        var len: usize = 0;
+        var pos: usize = 0;
+        var tab_pending: bool = false;
+        while (true) {
+            const b = stdin.takeByte() catch |err| switch (err) {
+                error.EndOfStream => {
+                    try out.writeAll("\n");
+                    try out.flush();
+                    return;
+                },
+                else => return err,
+            };
+            switch (b) {
+                '\n', '\r' => {
+                    try out.writeByte('\n');
+                    try out.flush();
+                    break;
+                },
+                '\t' => {
+                    try handleTab(init, out, path_env, buf, &len, &pos, &tab_pending);
+                    try out.flush();
+                },
+                0x7f, 0x08 => { //backspace
+                    if (len > 0) {
+                        len -= 1;
+                        pos -= 1;
+                        // move back, wipe, move back
+                        try out.writeAll("\x08 \x08");
+                        try out.flush();
+                    }
+                    tab_pending = false;
+                },
+                0x04 => { // ctrl - d
+                    if (len == 0) {
+                        try out.writeAll("\n");
+                        try out.flush();
+                        return;
+                    }
+                },
+                else => {
+                    if (b >= 0x20 and b <= 0x7e) {
+                        if (len < buf.len) {
+                            buf[len] = b;
+                            len += 1;
+                            pos += 1;
+                            try out.writeByte(b);
+                            try out.flush();
+                        }
+                        tab_pending = false;
+                    } else {
+                        tab_pending = false;
+                    }
+                },
+            }
+        }
+
+        const r = processLine(init, out, path_env, buf[0..len]) catch {
             try out.writeAll("unexpected EOF while looking for matching quote\n");
             continue;
         };
-        if (r == .exit) break;
+
+        if (r == .exit) return;
         try out.flush();
     }
 }
