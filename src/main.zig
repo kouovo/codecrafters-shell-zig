@@ -18,6 +18,40 @@ fn containsStr(items: []const []u8, name: []const u8) bool {
 }
 
 const BUILTIN_NAMES = [_][]const u8{ "cd", "echo", "exit", "pwd", "type" };
+
+fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.ArrayList([]u8)) !void {
+    const gpa = init.gpa;
+
+    const last_slash = std.mem.lastIndexOfScalar(u8, word, '/');
+    const dir_part: []const u8 = blk: {
+        if (last_slash) |i| {
+            if (i == 0) break :blk "/";
+            break :blk word[0..i];
+        }
+        break :blk ".";
+    };
+    const prefix = if (last_slash) |i| word[i + 1 ..] else word;
+    const stem: []const u8 = if (last_slash) |i| word[0 .. i + 1] else "";
+    var dir = std.Io.Dir.cwd().openDir(init.io, dir_part, .{ .iterate = true, .access_sub_paths = false }) catch return;
+    defer dir.close(init.io);
+
+    var it = dir.iterate();
+    while (try it.next(init.io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        if (containsStr(list.items, entry.name)) continue;
+
+        const candidate = try gpa.alloc(u8, stem.len + entry.name.len);
+        @memcpy(candidate[0..stem.len], stem);
+        @memcpy(candidate[stem.len..], entry.name);
+        try list.append(gpa, candidate);
+    }
+
+    std.mem.sort([]u8, list.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+}
 fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList([]u8)) !void {
     const gpa = init.gpa;
 
@@ -88,16 +122,17 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     const word = buf[word_start..len];
 
-    if (word_start != 0) {
-        tab_pending_ptr.* = false;
-        return;
-    }
     var candidates: std.ArrayList([]u8) = .empty;
     defer {
         for (candidates.items) |c| init.gpa.free(c);
         candidates.deinit(init.gpa);
     }
-    try gatherCandidates(init, path_env, word, &candidates);
+
+    if (word_start != 0) {
+        try gatherFileCandidates(init, word, &candidates);
+    } else {
+        try gatherCandidates(init, path_env, word, &candidates);
+    }
 
     if (candidates.items.len == 0) {
         try out.writeByte(0x07);
@@ -112,6 +147,7 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
         tab_pending_ptr.* = false;
         return;
     }
+
     const common = commonPrefixLen(candidates.items);
     if (common > word.len) {
         const comp = candidates.items[0];
