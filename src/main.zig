@@ -1,25 +1,25 @@
 const std = @import("std");
+const tokenzier = @import("tokenizer.zig");
 
 const Builtin = enum { exit, echo, type, pwd, unknown, cd };
-const Op = struct {
-    kind: enum { gt, gtgt, lt },
-    fd: u8, // 0=stdin, 1=stdout, 2=stderr
+const Redir = struct { op: tokenzier.Op, path: []const u8 };
+const Candidate = struct {
+    name: []u8,
+    is_dir: bool = false,
 };
-const Result = union(enum) { word: [:0]const u8, op: Op };
-const Redir = struct { op: Op, path: []const u8 };
 
 fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
 
-fn containsStr(items: []const []u8, name: []const u8) bool {
-    for (items) |it| if (std.mem.eql(u8, it, name)) return true;
+fn containsStr(items: []const Candidate, name: []const u8) bool {
+    for (items) |it| if (std.mem.eql(u8, it.name, name)) return true;
     return false;
 }
 
 const BUILTIN_NAMES = [_][]const u8{ "cd", "echo", "exit", "pwd", "type" };
 
-fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.ArrayList([]u8)) !void {
+fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.ArrayList(Candidate)) !void {
     const gpa = init.gpa;
 
     const last_slash = std.mem.lastIndexOfScalar(u8, word, '/');
@@ -43,22 +43,22 @@ fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.Arr
         const candidate = try gpa.alloc(u8, stem.len + entry.name.len);
         @memcpy(candidate[0..stem.len], stem);
         @memcpy(candidate[stem.len..], entry.name);
-        try list.append(gpa, candidate);
+        try list.append(gpa, .{ .name = candidate, .is_dir = entry.kind == .directory });
     }
 
-    std.mem.sort([]u8, list.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    std.mem.sort(Candidate, list.items, {}, struct {
+        fn lt(_: void, a: Candidate, b: Candidate) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
 }
-fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList([]u8)) !void {
+fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList(Candidate)) !void {
     const gpa = init.gpa;
 
     for (BUILTIN_NAMES) |b| {
         if (std.mem.startsWith(u8, b, prefix)) {
             if (containsStr(list.items, b)) continue;
-            try list.append(gpa, try gpa.dupe(u8, b));
+            try list.append(gpa, .{ .name = try gpa.dupe(u8, b) });
         }
     }
     var path_iter = std.mem.tokenizeScalar(u8, path_env, ':');
@@ -74,25 +74,25 @@ fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []cons
             if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
             dir.access(init.io, entry.name, .{ .execute = true }) catch continue;
             if (containsStr(list.items, entry.name)) continue;
-            try list.append(gpa, try gpa.dupe(u8, entry.name));
+            try list.append(gpa, .{ .name = try gpa.dupe(u8, entry.name) });
         }
     }
 
-    std.mem.sort([]u8, list.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    std.mem.sort(Candidate, list.items, {}, struct {
+        fn lt(_: void, a: Candidate, b: Candidate) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
 }
 
-fn commonPrefixLen(items: []const []u8) usize {
+fn commonPrefixLen(items: []const Candidate) usize {
     if (items.len == 0) return 0;
-    const first = items[0];
+    const first = items[0].name;
     var i: usize = 0;
     outer: while (i < first.len) {
         const c = first[i];
         for (items[1..]) |rest| {
-            if (i >= rest.len or rest[i] != c) break :outer;
+            if (i >= rest.name.len or rest.name[i] != c) break :outer;
         }
         i += 1;
     }
@@ -122,9 +122,9 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     const word = buf[word_start..len];
 
-    var candidates: std.ArrayList([]u8) = .empty;
+    var candidates: std.ArrayList(Candidate) = .empty;
     defer {
-        for (candidates.items) |c| init.gpa.free(c);
+        for (candidates.items) |c| init.gpa.free(c.name);
         candidates.deinit(init.gpa);
     }
 
@@ -142,8 +142,8 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     if (candidates.items.len == 1) {
         const comp = candidates.items[0];
-        try appendToLine(out, buf, len_ptr, pos_ptr, comp[word.len..]);
-        try appendToLine(out, buf, len_ptr, pos_ptr, " ");
+        try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..]);
+        try appendToLine(out, buf, len_ptr, pos_ptr, if (comp.is_dir) "/" else " ");
         tab_pending_ptr.* = false;
         return;
     }
@@ -151,7 +151,7 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
     const common = commonPrefixLen(candidates.items);
     if (common > word.len) {
         const comp = candidates.items[0];
-        try appendToLine(out, buf, len_ptr, pos_ptr, comp[word.len..common]);
+        try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..common]);
         tab_pending_ptr.* = false;
         return;
     }
@@ -160,7 +160,8 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
         try out.writeByte('\n');
         for (candidates.items, 0..) |c, idx| {
             if (idx > 0) try out.writeAll("  ");
-            try out.writeAll(c);
+            try out.writeAll(c.name);
+            if (c.is_dir) try out.writeByte('/');
         }
 
         try out.writeByte('\n');
@@ -172,190 +173,6 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
         tab_pending_ptr.* = true;
     }
 }
-
-pub const Tokenizer = struct {
-    allocator: std.mem.Allocator,
-    src: []const u8,
-    buffer: []u8,
-    index: usize = 0,
-    start: usize = 0,
-    end: usize = 0,
-    pending: ?Result = null,
-
-    const Self = @This();
-    const Msg = enum { normal, single, double, done };
-
-    pub const InitError = error{OutOfMemory};
-    pub const Error = error{UnclosedQuote};
-
-    pub fn init(allocator: std.mem.Allocator, src: []const u8) InitError!Self {
-        const buffer = try allocator.alloc(u8, src.len + 1);
-        errdefer allocator.free(buffer);
-        return .{ .allocator = allocator, .src = src, .buffer = buffer };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.buffer);
-    }
-
-    pub fn next(self: *Self) Error!?Result {
-        if (self.pending) |p| {
-            self.pending = null;
-            return p;
-        }
-        while (self.index < self.src.len and isBlank(self.src[self.index])) self.index += 1;
-        if (self.index >= self.src.len) return null;
-
-        self.start = self.end;
-        var m: Msg = .normal;
-        while (true) {
-            m = switch (m) {
-                .normal => try self.handleNormal(),
-                .single => try self.handleSingle(),
-                .double => try self.handleDouble(),
-                .done => return self.finish(),
-            };
-        }
-    }
-    fn handleOperator(self: *Self) Result {
-        const c = self.src[self.index];
-        switch (c) {}
-        return Result{};
-    }
-
-    fn handleNormal(self: *Self) Error!Msg {
-        if (self.index >= self.src.len) return .done;
-        const c = self.src[self.index];
-        switch (c) {
-            ' ', '\t' => return .done,
-            '\'' => {
-                self.index += 1;
-                return .single;
-            },
-            '"' => {
-                self.index += 1;
-                return .double;
-            },
-            '\\' => {
-                self.index += 1;
-                if (self.index < self.src.len) {
-                    self.write(self.src[self.index]);
-                    self.index += 1;
-                }
-                return .normal;
-            },
-            '>', '<' => return self.emitOp(if (c == '>') 1 else 0),
-            '0', '1', '2' => {
-                if (self.index + 1 < self.src.len and
-                    (self.src[self.index + 1] == '>' or self.src[self.index + 1] == '<'))
-                {
-                    const fd = c - '0';
-                    self.index += 1;
-                    return self.emitOp(fd);
-                }
-                self.write(c);
-                self.index += 1;
-                return .normal;
-            },
-            else => {
-                self.write(c);
-                self.index += 1;
-                return .normal;
-            },
-        }
-    }
-
-    fn emitOp(self: *Self, fd: u8) Msg {
-        const c = self.src[self.index];
-        self.index += 1;
-        if (c == '>') {
-            if (self.index < self.src.len and self.src[self.index] == '>') {
-                self.index += 1;
-                self.pending = .{ .op = .{ .kind = .gtgt, .fd = fd } };
-            } else {
-                self.pending = .{ .op = .{ .kind = .gt, .fd = fd } };
-            }
-        } else { // '<'
-            self.pending = .{ .op = .{ .kind = .lt, .fd = fd } };
-        }
-        return .done;
-    }
-
-    fn handleSingle(self: *Self) Error!Msg {
-        if (self.index >= self.src.len) return Error.UnclosedQuote;
-        const c = self.src[self.index];
-        switch (c) {
-            '\'' => {
-                self.index += 1;
-                return .normal;
-            },
-            else => {
-                self.write(c);
-                self.index += 1;
-                return .single;
-            },
-        }
-    }
-
-    fn handleDouble(self: *Self) Error!Msg {
-        if (self.index >= self.src.len) return Error.UnclosedQuote;
-        const c = self.src[self.index];
-        switch (c) {
-            '"' => {
-                self.index += 1;
-                return .normal;
-            },
-            '\\' => {
-                if (self.index + 1 >= self.src.len) {
-                    self.write(c);
-                    self.index += 1;
-                    return .double;
-                }
-                const n = self.src[self.index + 1];
-                if (n == '"' or n == '\\' or n == '$' or n == '`') {
-                    self.write(n);
-                    self.index += 2;
-                } else {
-                    self.write(c);
-                    self.index += 1;
-                }
-                return .double;
-            },
-            else => {
-                self.write(c);
-                self.index += 1;
-                return .double;
-            },
-        }
-    }
-    fn peek(self: *Self) ?u8 {
-        if (self.index + 1 >= self.src.len) return null;
-        return self.src[self.index + 1];
-    }
-
-    fn finish(self: *Self) Result {
-        if (self.start == self.end) {
-            if (self.pending) |p| {
-                self.pending = null;
-                return p;
-            }
-        }
-        self.buffer[self.end] = 0;
-        const token = self.buffer[self.start..self.end :0];
-        self.end += 1;
-        self.start = self.end;
-        return Result{ .word = token };
-    }
-
-    fn write(self: *Self, c: u8) void {
-        self.buffer[self.end] = c;
-        self.end += 1;
-    }
-
-    fn isBlank(c: u8) bool {
-        return c == ' ' or c == '\t';
-    }
-};
 
 fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name: []const u8) !?[]u8 {
     var dirs = std.mem.tokenizeScalar(u8, path_env, ':');
@@ -381,7 +198,7 @@ fn processLine(
     path_env: []const u8,
     line: []const u8,
 ) !LineResult {
-    var it = try Tokenizer.init(init.gpa, line);
+    var it = try tokenzier.Tokenizer.init(init.gpa, line);
     defer it.deinit();
     const cmd = (try it.next()) orelse return .cont;
     var argv: std.ArrayList([]const u8) = .empty;
