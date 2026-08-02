@@ -7,37 +7,91 @@ const CompletionProvider = enum {
     directory,
 };
 
+const CompleteAction = enum {
+    print,
+    register_external,
+    register_builtin,
+};
+
+fn parseCompleteAction(args: []const []const u8) CompleteAction {
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "-p")) {
+            return .print;
+        }
+
+        if (std.mem.eql(u8, args[0], "-C")) {
+            return .register_external;
+        }
+    }
+    return .register_builtin;
+}
+
+const CompletionSpec = union(enum) {
+    builtin: CompletionProvider,
+    external: []u8,
+
+    fn deinit(
+        self: *CompletionSpec,
+        gpa: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .builtin => {},
+            .external => |generator| {
+                gpa.free(generator);
+            },
+        }
+    }
+};
+
 const CompletionRegistry = struct {
-    providers: std.StringArrayHashMapUnmanaged(CompletionProvider) = .empty,
+    specs: std.StringArrayHashMapUnmanaged(CompletionSpec) = .empty,
 
     fn register(
         self: *CompletionRegistry,
         gpa: std.mem.Allocator,
         command: []const u8,
-        provider: CompletionProvider,
+        spec: CompletionSpec,
     ) !void {
         const owned_command = try gpa.dupe(u8, command);
         errdefer gpa.free(owned_command);
-        const result = try self.providers.getOrPut(gpa, command);
+        const result = try self.specs.getOrPut(gpa, command);
 
         if (result.found_existing) {
+            result.value_ptr.deinit(gpa);
             gpa.free(owned_command);
         } else {
             result.key_ptr.* = owned_command;
         }
-        result.value_ptr.* = provider;
+        result.value_ptr.* = spec;
     }
 
-    fn lookup(self: *const CompletionRegistry, command: []const u8) ?CompletionProvider {
-        return self.providers.get(command);
+    fn registerExternal(
+        self: *CompletionRegistry,
+        gpa: std.mem.Allocator,
+        command: []const u8,
+        generator: []const u8,
+    ) !void {
+        const owned_generator = try gpa.dupe(u8, generator);
+        errdefer gpa.free(owned_generator);
+
+        try self.register(
+            gpa,
+            command,
+            .{ .external = owned_generator },
+        );
+    }
+
+    fn lookup(self: *const CompletionRegistry, command: []const u8) ?CompletionSpec {
+        return self.specs.get(command);
     }
 
     pub fn deinit(self: *CompletionRegistry, gpa: std.mem.Allocator) void {
-        var it = self.providers.iterator();
+        var it = self.specs.iterator();
         while (it.next()) |entry| {
             gpa.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(gpa);
         }
-        self.providers.deinit(gpa);
+        self.specs.deinit(gpa);
     }
 };
 
@@ -73,6 +127,51 @@ fn gatherDirectoryCompletion(init: std.process.Init, word: []const u8, list: *st
     }
 
     list.shrinkRetainingCapacity(write_index);
+}
+
+fn gatherExternalCompletion(
+    init: std.process.Init,
+    generator: []const u8,
+    command: []const u8,
+    current_word: []const u8,
+    previous_word: []const u8,
+    list: *std.ArrayList(CompletionItem),
+) !void {
+    var exec_argv: std.ArrayList([]const u8) = .empty;
+    defer exec_argv.deinit(init.gpa);
+
+    try exec_argv.append(init.gpa, generator);
+
+    try exec_argv.append(init.gpa, command);
+    try exec_argv.append(init.gpa, current_word);
+    try exec_argv.append(init.gpa, previous_word);
+
+    var child = try std.process.spawn(init.io, .{
+        .argv = exec_argv.items,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+
+    defer child.kill(init.io);
+
+    if (child.stdout) |child_stdout| {
+        var read_buf: [4096]u8 = undefined;
+        var reader = child_stdout.readerStreaming(
+            init.io,
+            &read_buf,
+        );
+        while (try reader.interface.takeDelimiter('\n')) |line| {
+            const name = std.mem.trimEnd(u8, line, "\r");
+
+            if (name.len == 0) continue;
+
+            try list.append(init.gpa, .{
+                .name = try init.gpa.dupe(u8, name),
+                .is_dir = false,
+            });
+        }
+    }
+    _ = try child.wait(init.io);
 }
 
 fn gatherFileCompletion(init: std.process.Init, word: []const u8, list: *std.ArrayList(CompletionItem)) !void {
@@ -194,11 +293,18 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
             .word => |w| w,
             .op => return,
         };
-        const provider = registry.providers.get(first_cmd) orelse CompletionProvider.file;
-        switch (provider) {
-            .command => try gatherCompletion(init, path_env, word, &completions),
-            .file => try gatherFileCompletion(init, word, &completions),
-            .directory => try gatherDirectoryCompletion(init, word, &completions),
+        const spec: CompletionSpec = registry.lookup(first_cmd) orelse .{ .builtin = .file };
+        switch (spec) {
+            .builtin => |provider| {
+                switch (provider) {
+                    .command => try gatherCompletion(init, path_env, word, &completions),
+                    .file => try gatherFileCompletion(init, word, &completions),
+                    .directory => try gatherDirectoryCompletion(init, word, &completions),
+                }
+            },
+            .external => |generator| {
+                try gatherExternalCompletion(init, generator, first_cmd, word, "", &completions);
+            },
         }
     }
 
@@ -308,42 +414,80 @@ fn processLine(
             }
         },
         .complete => {
-            if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "-p")) {
-                if (argv.items.len != 2) {
-                    try out.writeAll("complete: usage: complete -p NAME\n");
+            const action = parseCompleteAction(argv.items);
+            switch (action) {
+                .print => {
+                    if (argv.items.len != 2) {
+                        try out.writeAll("complete: usage: complete -p NAME\n");
+                        return .cont;
+                    }
+                    const name = argv.items[1];
+                    const spec = registry.lookup(name) orelse {
+                        try out.print("complete: {s}: no completion specification\n", .{name});
+                        return .cont;
+                    };
+                    switch (spec) {
+                        .builtin => |provider| {
+                            try out.print(
+                                "complete {s} {s}\n",
+                                .{
+                                    name,
+                                    completionProviderName(provider),
+                                },
+                            );
+                        },
+                        .external => |generator| {
+                            try out.print(
+                                "complete -C {s} {s}\n",
+                                .{
+                                    generator,
+                                    name,
+                                },
+                            );
+                        },
+                    }
                     return .cont;
-                }
-                const name = argv.items[1];
-                const provider = registry.lookup(name) orelse {
-                    try out.print("complete: {s}: no completion specification\n", .{name});
-                    return .cont;
-                };
-                try out.print(
-                    "complete {s} {s}\n",
-                    .{
+                },
+                .register_external => {
+                    if (argv.items.len != 3) {
+                        try out.writeAll(
+                            "complete: usage: complete -C GENERATOR NAME\n",
+                        );
+                        return .cont;
+                    }
+
+                    const generator = argv.items[1];
+                    const name = argv.items[2];
+                    try registry.registerExternal(
+                        init.gpa,
                         name,
-                        completionProviderName(provider),
-                    },
-                );
+                        generator,
+                    );
+                    try out.print(
+                        "{s} now uses external completion command {s}\n",
+                        .{ name, generator },
+                    );
+                    return .cont;
+                },
+                .register_builtin => {
+                    if (argv.items.len < 2) {
+                        try out.writeAll("complete: useage: complete NAME[command|file|directory]\n");
+                        return .cont;
+                    }
 
-                return .cont;
+                    const name = argv.items[0];
+                    const kind_str = argv.items[1];
+                    const kind = std.meta.stringToEnum(CompletionProvider, kind_str) orelse {
+                        try out.print(
+                            "complete: unknown provider: {s}\n",
+                            .{kind_str},
+                        );
+                        return .cont;
+                    };
+                    try registry.register(init.gpa, name, .{ .builtin = kind });
+                    try out.print("{s} is now a {s} completion\n", .{ name, kind_str });
+                },
             }
-            if (argv.items.len < 2) {
-                try out.writeAll("complete: useage: complete NAME[command|file|directory]\n");
-                return .cont;
-            }
-
-            const name = argv.items[0];
-            const kind_str = argv.items[1];
-            const kind = std.meta.stringToEnum(CompletionProvider, kind_str) orelse {
-                try out.print(
-                    "complete: unknown provider: {s}\n",
-                    .{kind_str},
-                );
-                return .cont;
-            };
-            try registry.register(init.gpa, name, kind);
-            try out.print("{s} is now a {s} completion\n", .{ name, kind_str });
         },
         .echo => {
             var file_buf: [4096]u8 = undefined;
