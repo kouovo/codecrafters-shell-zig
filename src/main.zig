@@ -1,9 +1,49 @@
 const std = @import("std");
 const tokenzier = @import("tokenizer.zig");
 
-const Builtin = enum { exit, echo, type, pwd, unknown, cd };
+const CompletionProvider = enum {
+    command,
+    file,
+    directory,
+};
+
+const CompletionRegistry = struct {
+    providers: std.StringArrayHashMapUnmanaged(CompletionProvider) = .empty,
+
+    fn register(
+        self: *CompletionRegistry,
+        gpa: std.mem.Allocator,
+        command: []const u8,
+        provider: CompletionProvider,
+    ) !void {
+        const owned_command = try gpa.dupe(u8, command);
+        errdefer gpa.free(owned_command);
+        const result = try self.providers.getOrPut(gpa, command);
+
+        if (result.found_existing) {
+            gpa.free(owned_command);
+        } else {
+            result.key_ptr.* = owned_command;
+        }
+        result.value_ptr.* = provider;
+    }
+
+    fn lookup(self: *const CompletionRegistry, command: []const u8) ?CompletionProvider {
+        return self.providers.get(command);
+    }
+
+    pub fn deinit(self: *CompletionRegistry, gpa: std.mem.Allocator) void {
+        var it = self.providers.iterator();
+        while (it.next()) |entry| {
+            gpa.free(entry.key_ptr.*);
+        }
+        self.providers.deinit(gpa);
+    }
+};
+
+const Builtin = enum { exit, echo, type, pwd, unknown, cd, complete };
 const Redir = struct { op: tokenzier.Op, path: []const u8 };
-const Candidate = struct {
+const CompletionItem = struct {
     name: []u8,
     is_dir: bool = false,
 };
@@ -12,14 +52,30 @@ fn parseBuiltin(name: []const u8) Builtin {
     return std.meta.stringToEnum(Builtin, name) orelse .unknown;
 }
 
-fn containsStr(items: []const Candidate, name: []const u8) bool {
+fn containsStr(items: []const CompletionItem, name: []const u8) bool {
     for (items) |it| if (std.mem.eql(u8, it.name, name)) return true;
     return false;
 }
 
-const BUILTIN_NAMES = [_][]const u8{ "cd", "echo", "exit", "pwd", "type" };
+const BUILTIN_NAMES = [_][]const u8{ "cd", "echo", "exit", "pwd", "type", "complete" };
 
-fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.ArrayList(Candidate)) !void {
+fn gatherDirectoryCompletion(init: std.process.Init, word: []const u8, list: *std.ArrayList(CompletionItem)) !void {
+    try gatherFileCompletion(init, word, list);
+
+    var write_index: usize = 0;
+    for (list.items) |item| {
+        if (item.is_dir) {
+            list.items[write_index] = item;
+            write_index += 1;
+        } else {
+            init.gpa.free(item.name);
+        }
+    }
+
+    list.shrinkRetainingCapacity(write_index);
+}
+
+fn gatherFileCompletion(init: std.process.Init, word: []const u8, list: *std.ArrayList(CompletionItem)) !void {
     const gpa = init.gpa;
 
     const last_slash = std.mem.lastIndexOfScalar(u8, word, '/');
@@ -46,13 +102,13 @@ fn gatherFileCandidates(init: std.process.Init, word: []const u8, list: *std.Arr
         try list.append(gpa, .{ .name = candidate, .is_dir = entry.kind == .directory });
     }
 
-    std.mem.sort(Candidate, list.items, {}, struct {
-        fn lt(_: void, a: Candidate, b: Candidate) bool {
+    std.mem.sort(CompletionItem, list.items, {}, struct {
+        fn lt(_: void, a: CompletionItem, b: CompletionItem) bool {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
 }
-fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList(Candidate)) !void {
+fn gatherCompletion(init: std.process.Init, path_env: []const u8, prefix: []const u8, list: *std.ArrayList(CompletionItem)) !void {
     const gpa = init.gpa;
 
     for (BUILTIN_NAMES) |b| {
@@ -78,14 +134,14 @@ fn gatherCandidates(init: std.process.Init, path_env: []const u8, prefix: []cons
         }
     }
 
-    std.mem.sort(Candidate, list.items, {}, struct {
-        fn lt(_: void, a: Candidate, b: Candidate) bool {
+    std.mem.sort(CompletionItem, list.items, {}, struct {
+        fn lt(_: void, a: CompletionItem, b: CompletionItem) bool {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
 }
 
-fn commonPrefixLen(items: []const Candidate) usize {
+fn commonPrefixLen(items: []const CompletionItem) usize {
     if (items.len == 0) return 0;
     const first = items[0].name;
     var i: usize = 0;
@@ -108,7 +164,7 @@ fn appendToLine(out: *std.Io.Writer, buf: []u8, len_ptr: *usize, pos_ptr: *usize
         try out.writeByte(c);
     }
 }
-fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, buf: []u8, len_ptr: *usize, pos_ptr: *usize, tab_pending_ptr: *bool) !void {
+fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, registry: *const CompletionRegistry, buf: []u8, len_ptr: *usize, pos_ptr: *usize, tab_pending_ptr: *bool) !void {
     const len = len_ptr.*;
     var word_start: usize = 0;
     var j: usize = len;
@@ -122,35 +178,47 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     const word = buf[word_start..len];
 
-    var candidates: std.ArrayList(Candidate) = .empty;
+    var completions: std.ArrayList(CompletionItem) = .empty;
     defer {
-        for (candidates.items) |c| init.gpa.free(c.name);
-        candidates.deinit(init.gpa);
+        for (completions.items) |c| init.gpa.free(c.name);
+        completions.deinit(init.gpa);
     }
 
-    if (word_start != 0) {
-        try gatherFileCandidates(init, word, &candidates);
+    if (word_start == 0) {
+        try gatherCompletion(init, path_env, word, &completions);
     } else {
-        try gatherCandidates(init, path_env, word, &candidates);
+        var line_tokens = try tokenzier.Tokenizer.init(init.gpa, buf[0..len]);
+        defer line_tokens.deinit();
+        const first_token = (try line_tokens.next()) orelse return;
+        const first_cmd = switch (first_token) {
+            .word => |w| w,
+            .op => return,
+        };
+        const provider = registry.providers.get(first_cmd) orelse CompletionProvider.file;
+        switch (provider) {
+            .command => try gatherCompletion(init, path_env, word, &completions),
+            .file => try gatherFileCompletion(init, word, &completions),
+            .directory => try gatherDirectoryCompletion(init, word, &completions),
+        }
     }
 
-    if (candidates.items.len == 0) {
+    if (completions.items.len == 0) {
         try out.writeByte(0x07);
         tab_pending_ptr.* = false;
         return;
     }
 
-    if (candidates.items.len == 1) {
-        const comp = candidates.items[0];
+    if (completions.items.len == 1) {
+        const comp = completions.items[0];
         try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..]);
         try appendToLine(out, buf, len_ptr, pos_ptr, if (comp.is_dir) "/" else " ");
         tab_pending_ptr.* = false;
         return;
     }
 
-    const common = commonPrefixLen(candidates.items);
+    const common = commonPrefixLen(completions.items);
     if (common > word.len) {
-        const comp = candidates.items[0];
+        const comp = completions.items[0];
         try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..common]);
         tab_pending_ptr.* = false;
         return;
@@ -158,7 +226,7 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     if (tab_pending_ptr.*) {
         try out.writeByte('\n');
-        for (candidates.items, 0..) |c, idx| {
+        for (completions.items, 0..) |c, idx| {
             if (idx > 0) try out.writeAll("  ");
             try out.writeAll(c.name);
             if (c.is_dir) try out.writeByte('/');
@@ -197,6 +265,7 @@ fn processLine(
     out: anytype,
     path_env: []const u8,
     line: []const u8,
+    registry: *CompletionRegistry,
 ) !LineResult {
     var it = try tokenzier.Tokenizer.init(init.gpa, line);
     defer it.deinit();
@@ -229,6 +298,26 @@ fn processLine(
             } else {
                 try out.print("{s}: not found\n", .{cmd2});
             }
+        },
+        .complete => {
+            // const cmd2 = argv.items[0];
+            // try out.print("complete: registered {s} -> {s}\n", .{ cmd2, "directory" });
+            if (argv.items.len < 2) {
+                try out.writeAll("complete: useage: complete NAME[command|file|directory]\n");
+                return .cont;
+            }
+
+            const name = argv.items[0];
+            const kind_str = argv.items[1];
+            const kind = std.meta.stringToEnum(CompletionProvider, kind_str) orelse {
+                try out.print(
+                    "complete: unknown provider: {s}\n",
+                    .{kind_str},
+                );
+                return .cont;
+            };
+            try registry.register(init.gpa, name, kind);
+            try out.print("{s} is now a {s} completion\n", .{ name, kind_str });
         },
         .echo => {
             var file_buf: [4096]u8 = undefined;
@@ -326,6 +415,8 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     var stdin_buffer: [4096]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &stdin_buffer);
+    var registry: CompletionRegistry = .{};
+    defer registry.deinit(init.gpa);
 
     var orig_termios: std.posix.termios = undefined;
     const interactive = blk: {
@@ -350,14 +441,14 @@ pub fn main(init: std.process.Init) !void {
     const path_env = init.environ_map.get("PATH") orelse "";
     if (interactive) {
         var line_buf: [4096]u8 = undefined;
-        try runRawLoop(init, out, &stdin.interface, path_env, &line_buf);
+        try runRawLoop(init, out, &stdin.interface, path_env, &registry, &line_buf);
     } else {
         while (true) {
             try out.writeAll("$ ");
             try out.flush();
 
             const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
-            const r = processLine(init, out, path_env, line) catch {
+            const r = processLine(init, out, path_env, line, &registry) catch {
                 try out.writeAll("unexpected EOF while looking for matching quote\n");
                 continue;
             };
@@ -367,7 +458,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader, path_env: []const u8, buf: []u8) !void {
+fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader, path_env: []const u8, registry: *CompletionRegistry, buf: []u8) !void {
     while (true) {
         try out.writeAll("$ ");
         try out.flush();
@@ -391,7 +482,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
                     break;
                 },
                 '\t' => {
-                    try handleTab(init, out, path_env, buf, &len, &pos, &tab_pending);
+                    try handleTab(init, out, path_env, registry, buf, &len, &pos, &tab_pending);
                     try out.flush();
                 },
                 0x7f, 0x08 => { //backspace
@@ -428,7 +519,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
             }
         }
 
-        const r = processLine(init, out, path_env, buf[0..len]) catch {
+        const r = processLine(init, out, path_env, buf[0..len], registry) catch {
             try out.writeAll("unexpected EOF while looking for matching quote\n");
             continue;
         };
