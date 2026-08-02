@@ -258,6 +258,14 @@ fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name
     return null;
 }
 
+fn completionProviderName(provider: CompletionProvider) []const u8 {
+    return switch (provider) {
+        .command => "command",
+        .file => "file",
+        .directory => "directory",
+    };
+}
+
 const LineResult = enum { cont, exit };
 
 fn processLine(
@@ -300,8 +308,26 @@ fn processLine(
             }
         },
         .complete => {
-            // const cmd2 = argv.items[0];
-            // try out.print("complete: registered {s} -> {s}\n", .{ cmd2, "directory" });
+            if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "-p")) {
+                if (argv.items.len != 2) {
+                    try out.writeAll("complete: usage: complete -p NAME\n");
+                    return .cont;
+                }
+                const name = argv.items[1];
+                const provider = registry.lookup(name) orelse {
+                    try out.print("complete: {s}: no completion specification\n", .{name});
+                    return .cont;
+                };
+                try out.print(
+                    "complete {s} {s}\n",
+                    .{
+                        name,
+                        completionProviderName(provider),
+                    },
+                );
+
+                return .cont;
+            }
             if (argv.items.len < 2) {
                 try out.writeAll("complete: useage: complete NAME[command|file|directory]\n");
                 return .cont;
