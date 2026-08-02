@@ -438,7 +438,7 @@ fn processLine(
                         },
                         .external => |generator| {
                             try out.print(
-                                "complete -C {s} {s}\n",
+                                "complete -C '{s}' {s}\n",
                                 .{
                                     generator,
                                     name,
