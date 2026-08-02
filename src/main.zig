@@ -7,6 +7,11 @@ const CompletionProvider = enum {
     directory,
 };
 
+const TabState = enum {
+    first_press,
+    second_press,
+};
+
 const CompleteAction = enum {
     print,
     register_external,
@@ -263,7 +268,16 @@ fn appendToLine(out: *std.Io.Writer, buf: []u8, len_ptr: *usize, pos_ptr: *usize
         try out.writeByte(c);
     }
 }
-fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, registry: *const CompletionRegistry, buf: []u8, len_ptr: *usize, pos_ptr: *usize, tab_pending_ptr: *bool) !void {
+fn handleTab(
+    init: std.process.Init,
+    out: *std.Io.Writer,
+    path_env: []const u8,
+    registry: *const CompletionRegistry,
+    buf: []u8,
+    len_ptr: *usize,
+    pos_ptr: *usize,
+    tab_state_ptr: *TabState,
+) !void {
     const len = len_ptr.*;
     var word_start: usize = 0;
     var j: usize = len;
@@ -310,7 +324,7 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
 
     if (completions.items.len == 0) {
         try out.writeByte(0x07);
-        tab_pending_ptr.* = false;
+        tab_state_ptr.* = .first_press;
         return;
     }
 
@@ -318,7 +332,7 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
         const comp = completions.items[0];
         try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..]);
         try appendToLine(out, buf, len_ptr, pos_ptr, if (comp.is_dir) "/" else " ");
-        tab_pending_ptr.* = false;
+        tab_state_ptr.* = .first_press;
         return;
     }
 
@@ -326,25 +340,27 @@ fn handleTab(init: std.process.Init, out: *std.Io.Writer, path_env: []const u8, 
     if (common > word.len) {
         const comp = completions.items[0];
         try appendToLine(out, buf, len_ptr, pos_ptr, comp.name[word.len..common]);
-        tab_pending_ptr.* = false;
+        tab_state_ptr.* = .first_press;
         return;
     }
+    switch (tab_state_ptr.*) {
+        .first_press => {
+            try out.writeByte(0x07);
+            tab_state_ptr.* = .second_press;
+        },
+        .second_press => {
+            try out.writeByte('\n');
+            for (completions.items, 0..) |c, idx| {
+                if (idx > 0) try out.writeAll("  ");
+                try out.writeAll(c.name);
+                if (c.is_dir) try out.writeByte('/');
+            }
 
-    if (tab_pending_ptr.*) {
-        try out.writeByte('\n');
-        for (completions.items, 0..) |c, idx| {
-            if (idx > 0) try out.writeAll("  ");
-            try out.writeAll(c.name);
-            if (c.is_dir) try out.writeByte('/');
-        }
-
-        try out.writeByte('\n');
-        try out.writeAll("$ ");
-        try out.writeAll(buf[0..len_ptr.*]);
-        tab_pending_ptr.* = false;
-    } else {
-        try out.writeByte(0x07);
-        tab_pending_ptr.* = true;
+            try out.writeByte('\n');
+            try out.writeAll("$ ");
+            try out.writeAll(buf[0..len_ptr.*]);
+            tab_state_ptr.* = .first_press;
+        },
     }
 }
 
@@ -632,7 +648,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
 
         var len: usize = 0;
         var pos: usize = 0;
-        var tab_pending: bool = false;
+        var tab_state: TabState = .first_press;
         while (true) {
             const b = stdin.takeByte() catch |err| switch (err) {
                 error.EndOfStream => {
@@ -649,7 +665,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
                     break;
                 },
                 '\t' => {
-                    try handleTab(init, out, path_env, registry, buf, &len, &pos, &tab_pending);
+                    try handleTab(init, out, path_env, registry, buf, &len, &pos, &tab_state);
                     try out.flush();
                 },
                 0x7f, 0x08 => { //backspace
@@ -660,7 +676,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
                         try out.writeAll("\x08 \x08");
                         try out.flush();
                     }
-                    tab_pending = false;
+                    tab_state = .first_press;
                 },
                 0x04 => { // ctrl - d
                     if (len == 0) {
@@ -678,9 +694,9 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
                             try out.writeByte(b);
                             try out.flush();
                         }
-                        tab_pending = false;
+                        tab_state = .first_press;
                     } else {
-                        tab_pending = false;
+                        tab_state = .first_press;
                     }
                 },
             }
