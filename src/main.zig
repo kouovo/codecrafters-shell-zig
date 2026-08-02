@@ -463,10 +463,7 @@ fn processLine(
                         name,
                         generator,
                     );
-                    try out.print(
-                        "{s} now uses external completion command {s}\n",
-                        .{ name, generator },
-                    );
+
                     return .cont;
                 },
                 .register_builtin => {
