@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const tokenzier = @import("tokenizer.zig");
 
 const CompletionProvider = enum {
@@ -268,6 +269,25 @@ fn appendToLine(out: *std.Io.Writer, buf: []u8, len_ptr: *usize, pos_ptr: *usize
         try out.writeByte(c);
     }
 }
+fn findPreviousWord(
+    init: std.process.Init,
+    buf: []const u8,
+    word_start: usize,
+) ![]u8 {
+    var previous_word: []const u8 = "";
+    var prefix_tokens = try tokenzier.Tokenizer.init(init.gpa, buf[0..word_start]);
+    defer prefix_tokens.deinit();
+
+    while (try prefix_tokens.next()) |tok| {
+        switch (tok) {
+            .word => |w| {
+                previous_word = w;
+            },
+            .op => {},
+        }
+    }
+    return try init.gpa.dupe(u8, previous_word);
+}
 fn handleTab(
     init: std.process.Init,
     out: *std.Io.Writer,
@@ -317,7 +337,9 @@ fn handleTab(
                 }
             },
             .external => |generator| {
-                try gatherExternalCompletion(init, generator, first_cmd, word, "", &completions);
+                const previous_word = try findPreviousWord(init, buf, word_start);
+                defer init.gpa.free(previous_word);
+                try gatherExternalCompletion(init, generator, first_cmd, word, previous_word, &completions);
             },
         }
     }
