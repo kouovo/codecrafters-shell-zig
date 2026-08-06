@@ -142,9 +142,18 @@ fn gatherExternalCompletion(
     current_word: []const u8,
     previous_word: []const u8,
     list: *std.ArrayList(CompletionItem),
+    line: []const u8,
+    point: usize,
 ) !void {
     var exec_argv: std.ArrayList([]const u8) = .empty;
     defer exec_argv.deinit(init.gpa);
+    var env_map = try init.environ_map.clone(init.gpa);
+    defer env_map.deinit();
+
+    var point_buf: [32]u8 = undefined;
+    const point_text = try std.fmt.bufPrint(&point_buf, "{d}", .{point});
+    try env_map.put("COMP_LINE", line);
+    try env_map.put("COMP_POINT", point_text);
 
     try exec_argv.append(init.gpa, generator);
 
@@ -156,6 +165,7 @@ fn gatherExternalCompletion(
         .argv = exec_argv.items,
         .stdout = .pipe,
         .stderr = .ignore,
+        .environ_map = &env_map,
     });
 
     defer child.kill(init.io);
@@ -166,8 +176,8 @@ fn gatherExternalCompletion(
             init.io,
             &read_buf,
         );
-        while (try reader.interface.takeDelimiter('\n')) |line| {
-            const name = std.mem.trimEnd(u8, line, "\r");
+        while (try reader.interface.takeDelimiter('\n')) |l| {
+            const name = std.mem.trimEnd(u8, l, "\r");
 
             if (name.len == 0) continue;
 
@@ -339,7 +349,7 @@ fn handleTab(
             .external => |generator| {
                 const previous_word = try findPreviousWord(init, buf, word_start);
                 defer init.gpa.free(previous_word);
-                try gatherExternalCompletion(init, generator, first_cmd, word, previous_word, &completions);
+                try gatherExternalCompletion(init, generator, first_cmd, word, previous_word, &completions, buf[0..len], pos_ptr.*);
             },
         }
     }
