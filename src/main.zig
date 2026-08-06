@@ -17,6 +17,7 @@ const CompleteAction = enum {
     print,
     register_external,
     register_builtin,
+    unregister_external,
 };
 
 fn parseCompleteAction(args: []const []const u8) CompleteAction {
@@ -27,6 +28,10 @@ fn parseCompleteAction(args: []const []const u8) CompleteAction {
 
         if (std.mem.eql(u8, args[0], "-C")) {
             return .register_external;
+        }
+
+        if (std.mem.eql(u8, args[0], "-r")) {
+            return .unregister_external;
         }
     }
     return .register_builtin;
@@ -69,6 +74,11 @@ const CompletionRegistry = struct {
             result.key_ptr.* = owned_command;
         }
         result.value_ptr.* = spec;
+    }
+    fn unregister(self: *CompletionRegistry, gpa: std.mem.Allocator, command: []const u8) !void {
+        var result = self.specs.fetchSwapRemove(command) orelse return;
+        gpa.free(result.key);
+        result.value.deinit(gpa);
     }
 
     fn registerExternal(
@@ -494,6 +504,22 @@ fn processLine(
                             );
                         },
                     }
+                    return .cont;
+                },
+                .unregister_external => {
+                    if (argv.items.len != 2) {
+                        try out.writeAll(
+                            "complete: usage: complete -r NAME\n",
+                        );
+                        return .cont;
+                    }
+
+                    const name = argv.items[1];
+                    try registry.unregister(
+                        init.gpa,
+                        name,
+                    );
+
                     return .cont;
                 },
                 .register_external => {
