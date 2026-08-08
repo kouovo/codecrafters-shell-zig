@@ -111,7 +111,7 @@ const CompletionRegistry = struct {
     }
 };
 
-const Builtin = enum { exit, echo, type, pwd, unknown, cd, complete };
+const Builtin = enum { exit, echo, type, pwd, unknown, cd, complete, jobs };
 const Redir = struct { op: tokenzier.Op, path: []const u8 };
 const CompletionItem = struct {
     name: []u8,
@@ -595,6 +595,7 @@ fn processLine(
             try w.writeAll("\n");
             try w.flush();
         },
+        .jobs => {},
         .pwd => {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const n = try std.process.currentPath(init.io, &buf);
