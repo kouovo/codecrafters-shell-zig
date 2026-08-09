@@ -1,118 +1,26 @@
 const std = @import("std");
-
-const tokenzier = @import("tokenizer.zig");
-
-const CompletionProvider = enum {
-    command,
-    file,
-    directory,
-};
+const CompletionRegistry = @import("Completion.zig");
+const Tokenizer = @import("Tokenizer.zig");
+const JobRegistry = @import("Job.zig");
 
 const TabState = enum {
     first_press,
     second_press,
 };
 
-const CompleteAction = enum {
-    print,
-    register_external,
-    register_builtin,
-    unregister_external,
+const Builtin = enum {
+    exit,
+    echo,
+    type,
+    pwd,
+    unknown,
+    cd,
+    complete,
+    jobs,
+    fg,
+    bg,
 };
-
-fn parseCompleteAction(args: []const []const u8) CompleteAction {
-    if (args.len > 0) {
-        if (std.mem.eql(u8, args[0], "-p")) {
-            return .print;
-        }
-
-        if (std.mem.eql(u8, args[0], "-C")) {
-            return .register_external;
-        }
-
-        if (std.mem.eql(u8, args[0], "-r")) {
-            return .unregister_external;
-        }
-    }
-    return .register_builtin;
-}
-
-const CompletionSpec = union(enum) {
-    builtin: CompletionProvider,
-    external: []u8,
-
-    fn deinit(
-        self: *CompletionSpec,
-        gpa: std.mem.Allocator,
-    ) void {
-        switch (self.*) {
-            .builtin => {},
-            .external => |generator| {
-                gpa.free(generator);
-            },
-        }
-    }
-};
-
-const CompletionRegistry = struct {
-    specs: std.StringArrayHashMapUnmanaged(CompletionSpec) = .empty,
-
-    fn register(
-        self: *CompletionRegistry,
-        gpa: std.mem.Allocator,
-        command: []const u8,
-        spec: CompletionSpec,
-    ) !void {
-        const owned_command = try gpa.dupe(u8, command);
-        errdefer gpa.free(owned_command);
-        const result = try self.specs.getOrPut(gpa, command);
-
-        if (result.found_existing) {
-            result.value_ptr.deinit(gpa);
-            gpa.free(owned_command);
-        } else {
-            result.key_ptr.* = owned_command;
-        }
-        result.value_ptr.* = spec;
-    }
-    fn unregister(self: *CompletionRegistry, gpa: std.mem.Allocator, command: []const u8) !void {
-        var result = self.specs.fetchSwapRemove(command) orelse return;
-        gpa.free(result.key);
-        result.value.deinit(gpa);
-    }
-
-    fn registerExternal(
-        self: *CompletionRegistry,
-        gpa: std.mem.Allocator,
-        command: []const u8,
-        generator: []const u8,
-    ) !void {
-        const owned_generator = try gpa.dupe(u8, generator);
-        errdefer gpa.free(owned_generator);
-
-        try self.register(
-            gpa,
-            command,
-            .{ .external = owned_generator },
-        );
-    }
-
-    fn lookup(self: *const CompletionRegistry, command: []const u8) ?CompletionSpec {
-        return self.specs.get(command);
-    }
-
-    pub fn deinit(self: *CompletionRegistry, gpa: std.mem.Allocator) void {
-        var it = self.specs.iterator();
-        while (it.next()) |entry| {
-            gpa.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(gpa);
-        }
-        self.specs.deinit(gpa);
-    }
-};
-
-const Builtin = enum { exit, echo, type, pwd, unknown, cd, complete, jobs };
-const Redir = struct { op: tokenzier.Op, path: []const u8 };
+const Redir = struct { op: Tokenizer.Op, path: []const u8 };
 const CompletionItem = struct {
     name: []u8,
     is_dir: bool = false,
@@ -295,7 +203,7 @@ fn findPreviousWord(
     word_start: usize,
 ) ![]u8 {
     var previous_word: []const u8 = "";
-    var prefix_tokens = try tokenzier.Tokenizer.init(init.gpa, buf[0..word_start]);
+    var prefix_tokens = try Tokenizer.init(init.gpa, buf[0..word_start]);
     defer prefix_tokens.deinit();
 
     while (try prefix_tokens.next()) |tok| {
@@ -340,14 +248,14 @@ fn handleTab(
     if (word_start == 0) {
         try gatherCompletion(init, path_env, word, &completions);
     } else {
-        var line_tokens = try tokenzier.Tokenizer.init(init.gpa, buf[0..len]);
+        var line_tokens = try Tokenizer.init(init.gpa, buf[0..len]);
         defer line_tokens.deinit();
         const first_token = (try line_tokens.next()) orelse return;
         const first_cmd = switch (first_token) {
             .word => |w| w,
             .op => return,
         };
-        const spec: CompletionSpec = registry.lookup(first_cmd) orelse .{ .builtin = .file };
+        const spec: CompletionRegistry.Spec = registry.lookup(first_cmd) orelse .{ .builtin = .file };
         switch (spec) {
             .builtin => |provider| {
                 switch (provider) {
@@ -422,14 +330,6 @@ fn findExecutable(io: std.Io, gpa: std.mem.Allocator, path_env: []const u8, name
     return null;
 }
 
-fn completionProviderName(provider: CompletionProvider) []const u8 {
-    return switch (provider) {
-        .command => "command",
-        .file => "file",
-        .directory => "directory",
-    };
-}
-
 const LineResult = enum { cont, exit };
 
 fn processLine(
@@ -438,19 +338,28 @@ fn processLine(
     path_env: []const u8,
     line: []const u8,
     registry: *CompletionRegistry,
+    job_registry: *JobRegistry,
 ) !LineResult {
-    var it = try tokenzier.Tokenizer.init(init.gpa, line);
+    var it = try Tokenizer.init(init.gpa, line);
     defer it.deinit();
     const cmd = (try it.next()) orelse return .cont;
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(init.gpa);
 
+    var background = false;
     var redir: ?Redir = null;
+
     while (try it.next()) |tok| switch (tok) {
         .word => |w| try argv.append(init.gpa, w),
-        .op => |op| {
-            const target = (try it.next()) orelse return .cont;
-            redir = .{ .op = op, .path = target.word };
+        .op => |op| switch (op.kind) {
+            .gt, .gtgt, .lt => {
+                const target = (try it.next()) orelse return .cont;
+                redir = .{ .op = op, .path = target.word };
+            },
+            .bg => {
+                // sleep 100 &
+                background = true;
+            },
         },
     };
 
@@ -471,8 +380,10 @@ fn processLine(
                 try out.print("{s}: not found\n", .{cmd2});
             }
         },
+        .bg => {},
+        .fg => {},
         .complete => {
-            const action = parseCompleteAction(argv.items);
+            const action = CompletionRegistry.parseAction(argv.items);
             switch (action) {
                 .print => {
                     if (argv.items.len != 2) {
@@ -490,7 +401,7 @@ fn processLine(
                                 "complete {s} {s}\n",
                                 .{
                                     name,
-                                    completionProviderName(provider),
+                                    CompletionRegistry.providerName(provider),
                                 },
                             );
                         },
@@ -515,10 +426,7 @@ fn processLine(
                     }
 
                     const name = argv.items[1];
-                    try registry.unregister(
-                        init.gpa,
-                        name,
-                    );
+                    registry.unregister(init.gpa, name);
 
                     return .cont;
                 },
@@ -548,7 +456,7 @@ fn processLine(
 
                     const name = argv.items[0];
                     const kind_str = argv.items[1];
-                    const kind = std.meta.stringToEnum(CompletionProvider, kind_str) orelse {
+                    const kind = std.meta.stringToEnum(CompletionRegistry.Provider, kind_str) orelse {
                         try out.print(
                             "complete: unknown provider: {s}\n",
                             .{kind_str},
@@ -643,7 +551,23 @@ fn processLine(
                 }
 
                 var child = try std.process.spawn(init.io, opts);
-                _ = try child.wait(init.io);
+                if (background) {
+                    const pgid = child.id orelse unreachable;
+                    const command = try init.gpa.dupe(u8, line);
+                    const id = job_registry.add(init.gpa, .{
+                        .id = 0,
+                        .type = .bg,
+                        .pgid = pgid,
+                        .state = .running,
+                        .command = command,
+                    }) catch |err| {
+                        init.gpa.free(command);
+                        return err;
+                    };
+                    try out.print("[{d}] {d}\n", .{ id, pgid });
+                } else {
+                    _ = try child.wait(init.io);
+                }
             } else {
                 try out.print("{s}: command not found\n", .{cmd.word});
             }
@@ -658,6 +582,8 @@ pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [4096]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &stdin_buffer);
     var registry: CompletionRegistry = .{};
+    var jobRegistry: JobRegistry = .{};
+    defer jobRegistry.deinit(init.gpa);
     defer registry.deinit(init.gpa);
 
     var orig_termios: std.posix.termios = undefined;
@@ -683,14 +609,14 @@ pub fn main(init: std.process.Init) !void {
     const path_env = init.environ_map.get("PATH") orelse "";
     if (interactive) {
         var line_buf: [4096]u8 = undefined;
-        try runRawLoop(init, out, &stdin.interface, path_env, &registry, &line_buf);
+        try runRawLoop(init, out, &stdin.interface, path_env, &registry, &jobRegistry, &line_buf);
     } else {
         while (true) {
             try out.writeAll("$ ");
             try out.flush();
 
             const line = (try stdin.interface.takeDelimiter('\n')) orelse break;
-            const r = processLine(init, out, path_env, line, &registry) catch {
+            const r = processLine(init, out, path_env, line, &registry, &jobRegistry) catch {
                 try out.writeAll("unexpected EOF while looking for matching quote\n");
                 continue;
             };
@@ -700,7 +626,15 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader, path_env: []const u8, registry: *CompletionRegistry, buf: []u8) !void {
+fn runRawLoop(
+    init: std.process.Init,
+    out: *std.Io.Writer,
+    stdin: *std.Io.Reader,
+    path_env: []const u8,
+    registry: *CompletionRegistry,
+    job_registry: *JobRegistry,
+    buf: []u8,
+) !void {
     while (true) {
         try out.writeAll("$ ");
         try out.flush();
@@ -761,7 +695,7 @@ fn runRawLoop(init: std.process.Init, out: *std.Io.Writer, stdin: *std.Io.Reader
             }
         }
 
-        const r = processLine(init, out, path_env, buf[0..len], registry) catch {
+        const r = processLine(init, out, path_env, buf[0..len], registry, job_registry) catch {
             try out.writeAll("unexpected EOF while looking for matching quote\n");
             continue;
         };
