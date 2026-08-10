@@ -8,7 +8,7 @@ pub const Result = union(enum) {
 };
 
 pub const Op = struct {
-    kind: enum { gt, gtgt, lt, bg },
+    kind: enum { gt, gtgt, lt, bg, and_and },
     fd: u8, // 0=stdin, 1=stdout, 2=stderr
 };
 
@@ -113,7 +113,12 @@ fn emitOp(self: *Tokenizer, fd: u8) Msg {
             self.pending = .{ .op = .{ .kind = .lt, .fd = fd } };
         },
         '&' => {
-            self.pending = .{ .op = .{ .kind = .bg, .fd = fd } };
+            if (self.index < self.src.len and self.src[self.index] == '&') {
+                self.index += 1;
+                self.pending = .{ .op = .{ .kind = .and_and, .fd = 0 } };
+            } else {
+                self.pending = .{ .op = .{ .kind = .bg, .fd = fd } };
+            }
         },
         else => {},
     }

@@ -2,6 +2,14 @@ const std = @import("std");
 pub const State = enum { running, stopped, done };
 pub const Type = enum { bg, fg };
 
+pub fn stateName(state: State) []const u8 {
+    return switch (state) {
+        .running => "running",
+        .done => "done",
+        .stopped => "stopped",
+    };
+}
+
 pub const Job = struct {
     id: usize,
     type: Type,
@@ -32,4 +40,8 @@ pub fn deinit(self: *JobRegistry, gpa: std.mem.Allocator) void {
         gpa.free(job.command);
     }
     self.jobs.deinit(gpa);
+}
+
+pub fn items(self: *const JobRegistry) []const Job {
+    return self.jobs.items;
 }

@@ -352,7 +352,7 @@ fn processLine(
     while (try it.next()) |tok| switch (tok) {
         .word => |w| try argv.append(init.gpa, w),
         .op => |op| switch (op.kind) {
-            .gt, .gtgt, .lt => {
+            .gt, .gtgt, .lt, .and_and => {
                 const target = (try it.next()) orelse return .cont;
                 redir = .{ .op = op, .path = target.word };
             },
@@ -503,7 +503,11 @@ fn processLine(
             try w.writeAll("\n");
             try w.flush();
         },
-        .jobs => {},
+        .jobs => {
+            for (job_registry.items()) |job| {
+                try out.print("[{d}]+  {s}\t{s}\n", .{ job.id, JobRegistry.stateName(job.state), job.command });
+            }
+        },
         .pwd => {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const n = try std.process.currentPath(init.io, &buf);
