@@ -505,7 +505,7 @@ fn processLine(
         },
         .jobs => {
             for (job_registry.items()) |job| {
-                try out.print("[{d}]+  {s}\t{s}\n", .{ job.id, JobRegistry.stateName(job.state), job.command });
+                try out.print("[{d}]{s}  {s}\t{s}\n", .{ job.id, job_registry.marker(job.id), JobRegistry.stateName(job.state), job.command });
             }
         },
         .pwd => {
