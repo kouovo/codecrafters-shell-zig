@@ -34,7 +34,7 @@ fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
     pid: std.posix.pid_t,
     status: u32,
 } {
-    var status: i32 = undefined;
+    var status: u32 = undefined;
     const rc = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
 
     switch (std.posix.errno(rc)) {
