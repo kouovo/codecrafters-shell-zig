@@ -641,7 +641,6 @@ fn runRawLoop(
     buf: []u8,
 ) !void {
     while (true) {
-        // try job_registry.reap(init.gpa);
         try out.writeAll("$ ");
         try out.flush();
 

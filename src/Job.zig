@@ -70,7 +70,7 @@ pub fn reap(
         }
 
         const mark = self.marker(job.id);
-        try out.print("[{d}]{s}  Done\t\t{s}\n", .{ job.id, mark, job.command });
+        try out.print("[{d}]{s}  Done                 {s}\n", .{ job.id, mark, job.command });
 
         if (self.current_id == job.id) self.current_id = self.previous_id;
         if (self.previous_id == job.id) self.current_id = null;
