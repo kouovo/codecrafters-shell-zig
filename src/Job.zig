@@ -32,7 +32,7 @@ previous_id: ?usize = null,
 
 fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
     pid: std.posix.pid_t,
-    status: i32,
+    status: u32,
 } {
     var status: i32 = undefined;
     const rc = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
