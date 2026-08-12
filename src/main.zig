@@ -504,6 +504,7 @@ fn processLine(
             try w.flush();
         },
         .jobs => {
+            try job_registry.reap(init.gpa, out);
             for (job_registry.items()) |job| {
                 try out.print("[{d}]{s}  {s}\t{s}\n", .{ job.id, job_registry.marker(job.id), JobRegistry.stateName(job.state), job.command });
             }
@@ -640,6 +641,7 @@ fn runRawLoop(
     buf: []u8,
 ) !void {
     while (true) {
+        // try job_registry.reap(init.gpa);
         try out.writeAll("$ ");
         try out.flush();
 

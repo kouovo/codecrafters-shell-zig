@@ -30,6 +30,55 @@ next_id: usize = 1,
 current_id: ?usize = null,
 previous_id: ?usize = null,
 
+fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
+    pid: std.posix.pid_t,
+    status: i32,
+} {
+    var status: i32 = undefined;
+    const rc = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
+
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {
+            const got: std.posix.pid_t = @intCast(rc);
+            if (got == 0) return null;
+            return .{ .pid = got, .status = status };
+        },
+        .CHILD => return null,
+        .INTR => return error.Interrupted,
+        else => return error.Unexpected,
+    }
+}
+
+pub fn reap(
+    self: *JobRegistry,
+    gpa: std.mem.Allocator,
+    out: anytype,
+) !void {
+    var i: usize = 0;
+    while (i < self.jobs.items.len) {
+        const job = &self.jobs.items[i];
+
+        if (job.state != .running) {
+            i += 1;
+            continue;
+        }
+
+        const waited = try waitpidNoHang(job.pgid);
+        if (waited == null) {
+            i += 1;
+            continue;
+        }
+
+        const mark = self.marker(job.id);
+        try out.print("[{d}]{s}  Done\t{s}\n", .{ job.id, mark, job.command });
+
+        if (self.current_id == job.id) self.current_id = self.previous_id;
+        if (self.previous_id == job.id) self.current_id = null;
+        gpa.free(job.command);
+        _ = self.jobs.orderedRemove(i);
+    }
+}
+
 pub fn add(
     self: *JobRegistry,
     gpa: std.mem.Allocator,
