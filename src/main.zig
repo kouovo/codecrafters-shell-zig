@@ -504,7 +504,7 @@ fn processLine(
             try w.flush();
         },
         .jobs => {
-            try job_registry.reap(init.gpa, out);
+            try job_registry.reap(init.gpa);
             for (job_registry.items()) |job| {
                 try out.print("[{d}]{s}  {s}\t{s}\n", .{ job.id, job_registry.marker(job.id), JobRegistry.stateName(job.state), job.command });
             }
