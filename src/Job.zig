@@ -32,9 +32,9 @@ previous_id: ?usize = null,
 
 fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
     pid: std.posix.pid_t,
-    status: u32,
+    status: i32,
 } {
-    var status: u32 = undefined;
+    var status: i32 = undefined;
     const rc = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
 
     switch (std.posix.errno(rc)) {
@@ -83,6 +83,33 @@ pub fn deinit(self: *JobRegistry, gpa: std.mem.Allocator) void {
         gpa.free(job.command);
     }
     self.jobs.deinit(gpa);
+}
+
+pub fn removeNotified(self: *JobRegistry, gpa: std.mem.Allocator) void {
+    var i: usize = 0;
+    while (i < self.jobs.items.len) {
+        if (self.jobs.items[i].state == .done) {
+            gpa.free(self.jobs.items[i].command);
+            _ = self.jobs.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    self.refreshMarkers();
+}
+
+fn refreshMarkers(self: *JobRegistry) void {
+    var newest: ?usize = null;
+    var previous: ?usize = null;
+
+    for (self.jobs.items) |job| {
+        if (job.state == .done) continue;
+        previous = newest;
+        newest = job.id;
+    }
+
+    self.current_id = newest;
+    self.previous_id = previous;
 }
 
 pub fn items(self: *const JobRegistry) []const Job {

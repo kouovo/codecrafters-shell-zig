@@ -506,7 +506,7 @@ fn processLine(
         .jobs => {
             try job_registry.reap();
             for (job_registry.items()) |job| {
-                const suffix: []const u8 = if (job.state == .Running) " &" else "";
+                const suffix: []const u8 = if (job.state == .running) " &" else "";
 
                 try out.print(
                     "[{d}]{s}  {s}                 {s}{s}\n",
