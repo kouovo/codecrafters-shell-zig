@@ -52,7 +52,7 @@ fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
 pub fn reap(
     self: *JobRegistry,
     gpa: std.mem.Allocator,
-    // out: anytype,
+    out: anytype,
 ) !void {
     var i: usize = 0;
     while (i < self.jobs.items.len) {
@@ -69,8 +69,8 @@ pub fn reap(
             continue;
         }
 
-        // const mark = self.marker(job.id);
-        // try out.print("[{d}]{s}  Done                 {s}\n", .{ job.id, mark, job.command });
+        const mark = self.marker(job.id);
+        try out.print("[{d}]{s}  Done                 {s}\n", .{ job.id, mark, job.command });
 
         if (self.current_id == job.id) self.current_id = self.previous_id;
         if (self.previous_id == job.id) self.current_id = null;
