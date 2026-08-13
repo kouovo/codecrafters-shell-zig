@@ -504,10 +504,22 @@ fn processLine(
             try w.flush();
         },
         .jobs => {
-            try job_registry.reap(init.gpa, out);
+            try job_registry.reap();
             for (job_registry.items()) |job| {
-                try out.print("[{d}]{s}  {s}\t{s}\n", .{ job.id, job_registry.marker(job.id), JobRegistry.stateName(job.state), job.command });
+                const suffix: []const u8 = if (job.state == .Running) " &" else "";
+
+                try out.print(
+                    "[{d}]{s}  {s}                 {s}{s}\n",
+                    .{
+                        job.id,
+                        job_registry.marker(job.id),
+                        JobRegistry.stateName(job.state),
+                        job.command,
+                        suffix,
+                    },
+                );
             }
+            job_registry.removeNotified(init.gpa);
         },
         .pwd => {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -558,7 +570,7 @@ fn processLine(
                 var child = try std.process.spawn(init.io, opts);
                 if (background) {
                     const pgid = child.id orelse unreachable;
-                    const command = try init.gpa.dupe(u8, stripBackgroundSuffix(line));
+                    const command = try init.gpa.dupe(u8, line);
                     const id = job_registry.add(init.gpa, .{
                         .id = 0,
                         .type = .bg,
@@ -710,10 +722,10 @@ fn runRawLoop(
     }
 }
 
-fn stripBackgroundSuffix(line: []const u8) []const u8 {
-    var s = std.mem.trimEnd(u8, line, " \t");
-    if (s.len > 0 and s[s.len - 1] == '&') {
-        s = std.mem.trimEnd(u8, s[0 .. s.len - 1], " \t");
-    }
-    return s;
-}
+// fn stripBackgroundSuffix(line: []const u8) []const u8 {
+//     var s = std.mem.trimEnd(u8, line, " \t");
+//     if (s.len > 0 and s[s.len - 1] == '&') {
+//         s = std.mem.trimEnd(u8, s[0 .. s.len - 1], " \t");
+//     }
+//     return s;
+// }

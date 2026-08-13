@@ -10,9 +10,9 @@ pub fn marker(self: *JobRegistry, id: usize) []const u8 {
 
 pub fn stateName(state: State) []const u8 {
     return switch (state) {
-        .running => "running",
-        .done => "done",
-        .stopped => "stopped",
+        .running => "Running",
+        .done => "Done",
+        .stopped => "Stopped",
     };
 }
 
@@ -51,31 +51,15 @@ fn waitpidNoHang(pid: std.posix.pid_t) !?struct {
 
 pub fn reap(
     self: *JobRegistry,
-    gpa: std.mem.Allocator,
-    out: anytype,
 ) !void {
-    var i: usize = 0;
-    while (i < self.jobs.items.len) {
-        const job = &self.jobs.items[i];
+    for (self.jobs.items) |*job| {
+        if (job.state != .running) continue;
 
-        if (job.state != .running) {
-            i += 1;
+        if (try waitpidNoHang(job.pgid) == null) {
             continue;
         }
 
-        const waited = try waitpidNoHang(job.pgid);
-        if (waited == null) {
-            i += 1;
-            continue;
-        }
-
-        const mark = self.marker(job.id);
-        try out.print("[{d}]{s}  Done                 {s}\n", .{ job.id, mark, job.command });
-
-        if (self.current_id == job.id) self.current_id = self.previous_id;
-        if (self.previous_id == job.id) self.current_id = null;
-        gpa.free(job.command);
-        _ = self.jobs.orderedRemove(i);
+        job.state = .done;
     }
 }
 
