@@ -506,16 +506,16 @@ fn processLine(
         .jobs => {
             try job_registry.reap();
             for (job_registry.items()) |job| {
-                // const suffix: []const u8 = if (job.state == .running) " &" else "";
+                const suffix: []const u8 = " &";
 
                 try out.print(
-                    "[{d}]{s}  {s}                 {s}\n",
+                    "[{d}]{s}  {s}                 {s}{s}\n",
                     .{
                         job.id,
                         job_registry.marker(job.id),
                         JobRegistry.stateName(job.state),
                         job.command,
-                        // suffix,
+                        suffix,
                     },
                 );
             }
